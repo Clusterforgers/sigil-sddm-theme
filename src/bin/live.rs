@@ -8,7 +8,9 @@
 //! renders. Keys do not steer the motion; they bloom a layer, which fades on its own.
 
 use imagespin::config;
-use imagespin::gpu::{self, Gpu, Uniforms, MAX_BOLT_SEGS, MAX_FLARES, MAX_PULSES};
+use imagespin::sigil;
+use imagespin::geom::Layer;
+use imagespin::gpu::{self, Gpu, Uniforms, MAX_BOLT_SEGS, MAX_FLARES, MAX_GLYPHS, MAX_PULSES};
 
 use rand::rngs::SmallRng;
 use rand::RngExt;
@@ -85,6 +87,24 @@ struct Flare {
     strength: f32,
 }
 
+/// Which mip of the artwork to read, given how the window maps onto it.
+///
+/// One sub-sample covers `1 / (fit * ss)` source texels; when that exceeds one the disc is
+/// being minified and level 0 is undersampled, which is what makes the thin gold lines
+/// crawl. Below one there is nothing to gain, so the level floors at zero.
+///
+/// The bias is not a fudge. Trilinear filtering blends toward a full 2x2 box, which is a
+/// wider filter than the footprint actually calls for, so the straight `-log2` over-blurs.
+/// Fitted against a brute-force `ss=8` render: -0.35 beats both level 0 and an unbiased
+/// level on closeness to that reference *and* on high-frequency energy, at 714x427 and at
+/// 500x300 alike.
+fn source_lod(fit_scale: f32, ss: u32, canvas_scale: f32) -> f32 {
+    // `canvas_scale` is how much denser the texture is than the coordinate space, which
+    // shifts the whole thing by one level per doubling.
+    let rate = (fit_scale * ss as f32 / canvas_scale.max(1e-3)).max(1e-3);
+    (-rate.log2() - 0.35).max(0.0)
+}
+
 /// Smoothstep, for envelopes that must not pop at either end.
 fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -118,6 +138,58 @@ fn flare_amount(f: &Flare) -> f32 {
     f.strength * smoothstep(0.0, 0.12, u) * (1.0 - smoothstep(0.25, 1.0, u))
 }
 
+
+/// A glyph that has been activated: lit, and drifting off the plate.
+struct Lit {
+    /// Where it sits in the artwork, un-rotated, and how far it reaches.
+    pos: [f32; 2],
+    half: [f32; 2],
+    /// The layer carrying it. The copy has to travel with that layer as it turns, or it
+    /// drifts away from the glyph it came out of.
+    layer: usize,
+    age: f32,
+    /// How long it waits before it starts, so a group ripples.
+    delay: f32,
+    life: f32,
+    /// How far out it drifts over its whole life, in source pixels.
+    travel: f32,
+    strength: f32,
+}
+
+/// How far through its own life a glyph is, counting from the end of its wait.
+fn lit_progress(l: &Lit) -> f32 {
+    ((l.age - l.delay) / l.life.max(1e-3)).clamp(0.0, 1.0)
+}
+
+/// Drifts out under its own momentum and settles, rather than travelling at a constant
+/// rate — which would read as being dragged.
+fn lit_travel(l: &Lit) -> f32 {
+    let u = lit_progress(l);
+    l.travel * (1.0 - (1.0 - u) * (1.0 - u))
+}
+
+/// How strongly the risen copy shows. It has to be gone by the time the glyph has
+/// finished travelling, or it just sits there as a second, brighter glyph.
+fn lit_ghost(l: &Lit) -> f32 {
+    let u = lit_progress(l);
+    l.strength * smoothstep(0.02, 0.22, u) * (1.0 - smoothstep(0.6, 1.0, u))
+}
+
+/// The worst frame seen in a reporting interval, and what was on screen for it.
+///
+/// A vsync-locked viewer cannot be timed by asking the GPU politely — every frame appears
+/// to take exactly one refresh until one of them misses, and then the gap jumps. So the
+/// thing to watch is the longest gap between frames, together with what was live when it
+/// happened. That is also precisely what "laggy" means to someone watching it.
+#[derive(Default, Clone, Copy)]
+struct Worst {
+    dt: f32,
+    pulses: usize,
+    limbs: usize,
+    flares: usize,
+    glyphs: usize,
+    bloom: f32,
+}
 
 /// Bolts an implosion throws out of the centre when it lands.
 const BURST_BOLTS: u32 = 9;
@@ -161,6 +233,12 @@ struct State {
     burst_base: f32,
     /// How brightly the whole disc is still answering the last collapse.
     flash: f32,
+    /// The layer regions, so a newly lit glyph can be told which one carries it.
+    layers: Vec<Layer>,
+    /// Every letter and symbol found in the artwork, and the few currently activated.
+    catalogue: Vec<imagespin::glyphs::Glyph>,
+    lit: Vec<Lit>,
+    next_lit: f32,
     /// Disc centre and outermost radius, in source pixels.
     center: [f32; 2],
     disc: f32,
@@ -400,6 +478,83 @@ impl State {
         });
     }
 
+
+    /// Which layer carries a point of the artwork.
+    ///
+    /// The same first-hit-wins walk the renderer does, on the un-rotated position, because
+    /// that is the frame the artwork and the layer regions are both written in.
+    fn owning_layer(&self, pos: [f32; 2]) -> usize {
+        let (dx, dy) = (pos[0] - self.center[0], pos[1] - self.center[1]);
+        let r = (dx * dx + dy * dy).sqrt();
+        let alpha = (-dx).atan2(-dy);
+        self.layers.iter().position(|l| l.contains(r, alpha)).unwrap_or(0)
+    }
+
+    /// Activate a cluster of glyphs.
+    ///
+    /// A seed is picked from the catalogue and its nearest neighbours go with it, each held
+    /// back a little longer than the last, so the group ripples outward from the seed rather
+    /// than snapping on together. One glyph alone reads as a flicker; a cluster reads as a
+    /// passage being called.
+    fn add_lit(&mut self) {
+        if self.catalogue.is_empty() {
+            return;
+        }
+        let seed = self.catalogue[self.rng.random_range(0..self.catalogue.len())];
+        let want = self.rng.random_range(3..9).min(MAX_GLYPHS);
+
+        // Nearest first. 279 glyphs, so sorting the lot costs nothing worth avoiding.
+        let mut near: Vec<(f32, usize)> = self
+            .catalogue
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let (dx, dy) = (g.pos[0] - seed.pos[0], g.pos[1] - seed.pos[1]);
+                (dx * dx + dy * dy, i)
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        for (rank, &(_, idx)) in near.iter().take(want).enumerate() {
+            if self.lit.len() >= MAX_GLYPHS {
+                self.lit.remove(0);
+            }
+            let g = self.catalogue[idx];
+            // A little past the ink, so the glow is not cropped to the letter.
+            let pad = 3.0;
+            let layer = self.owning_layer(g.pos);
+            self.lit.push(Lit {
+                pos: g.pos,
+                half: [g.radius + pad, g.radius + pad],
+                layer,
+                age: 0.0,
+                // Each one waits on the one before it, with a little scatter so the
+                // ripple does not look mechanical.
+                delay: rank as f32 * self.rng.random_range(0.03..0.09),
+                life: self.rng.random_range(1.3..2.4),
+                travel: self.rng.random_range(10.0..22.0),
+                strength: self.rng.random_range(0.75..1.25),
+            });
+        }
+    }
+
+    /// Age the activated glyphs, drop the spent ones, and light another when due.
+    fn advance_lit(&mut self, dt: f32) {
+        for l in self.lit.iter_mut() {
+            l.age += dt;
+        }
+        self.lit.retain(|l| l.age < l.delay + l.life);
+
+        self.next_lit -= dt;
+        if self.next_lit <= 0.0 {
+            self.add_lit();
+            // A group is already several glyphs, so leave a gap before the next one. Back
+            // to back they overlap into a permanent wash, which costs more and reads as
+            // less: the pause is what makes each one an event.
+            self.next_lit = self.rng.random_range(1.2..2.8);
+        }
+    }
+
     /// Release the fan a bolt at a time.
     ///
     /// Spread over a fifth of a second rather than fired at once, which reads as energy
@@ -484,6 +639,7 @@ impl State {
     fn advance_energy(&mut self, dt: f32) {
         self.advance_pulses(dt);
         self.advance_burst(dt);
+        self.advance_lit(dt);
         self.flash *= (-6.0 * dt).exp();
 
         for b in self.bolts.iter_mut() {
@@ -617,12 +773,17 @@ impl Gfx {
 struct App {
     st: State,
     uni: Uniforms,
+    /// The photograph, in the coordinates `layers.json` uses. Not what gets uploaded.
     src: image::RgbImage,
+    /// What does get uploaded, and how much denser it is than those coordinates.
+    canvas: image::RgbImage,
+    canvas_scale: f32,
     /// `None` until winit first resumes us and a window can be created.
     gfx: Option<Gfx>,
     last: Instant,
     fps_t: Instant,
     fps_n: u32,
+    worst: Worst,
 }
 
 impl App {
@@ -655,6 +816,7 @@ impl App {
         let n = self.st.names.len();
         self.uni.fit = [scale, (w - sw * scale) * 0.5, (h - sh * scale) * 0.5, n as f32];
         self.uni.params[0] = self.st.ss as f32;
+        self.uni.misc[0] = source_lod(scale, self.st.ss, self.canvas_scale);
         for i in 0..n {
             let a = self.st.angle[i];
             // The shader rotates by this angle rather than un-rotating an arctangent,
@@ -688,6 +850,50 @@ impl App {
         }
         self.uni.counts[2] = seg as f32;
         self.uni.counts[3] = self.st.flash;
+        self.uni.params[3] = self.st.lit.len() as f32;
+        for (i, l) in self.st.lit.iter().enumerate() {
+            // Where the glyph sits in the artwork, for emptying its slot.
+            self.uni.glyphs[i] = [l.pos[0], l.pos[1], l.half[0], l.half[1]];
+
+            // ...and where its copy has got to, in un-rotated space. The glyph rides its
+            // layer, so the copy has to be carried round by that layer's angle before the
+            // radial rise is added, or it would part company with the glyph it came from.
+            let ang = self.st.angle.get(l.layer).copied().unwrap_or(0.0);
+            let (s, c) = (ang.sin(), ang.cos());
+            let (ax, ay) = (l.pos[0] - self.st.center[0], l.pos[1] - self.st.center[1]);
+            // The inverse of the shader's artwork lookup, which rotates by +angle.
+            let (mut px, mut py) = (ax * c + ay * s, ay * c - ax * s);
+            let len = (px * px + py * py).sqrt().max(1e-3);
+            let travel = lit_travel(l);
+            px += px * travel / len;
+            py += py * travel / len;
+            self.uni.glyph_a[i] = [
+                self.st.center[0] + px,
+                self.st.center[1] + py,
+                lit_ghost(l),
+                lit_progress(l),
+            ];
+            self.uni.glyph_r[i] = [s, c, 0.0, 0.0];
+        }
+        // Two boxes, because the two passes happen in different frames: the glyphs are
+        // hidden where they sit in the artwork, the copies are drawn in un-rotated space.
+        // Groups are clusters, so both stay tight and almost every pixel skips both.
+        let mut art = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        let mut scr = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for (i, l) in self.st.lit.iter().enumerate() {
+            let grow = 1.0 + 1.6 * lit_progress(l);
+            let risen = [self.uni.glyph_a[i][0], self.uni.glyph_a[i][1]];
+            for k in 0..2 {
+                art[k] = art[k].min(l.pos[k] - l.half[k]);
+                art[k + 2] = art[k + 2].max(l.pos[k] + l.half[k]);
+                scr[k] = scr[k].min(risen[k] - l.half[k] * grow);
+                scr[k + 2] = scr[k + 2].max(risen[k] + l.half[k] * grow);
+            }
+        }
+        let empty = self.st.lit.is_empty();
+        self.uni.gbox = if empty { [0.0; 4] } else { art };
+        self.uni.gbox_p = if empty { [0.0; 4] } else { scr };
+
         gfx.queue.write_buffer(&gfx.gpu.ubuf, 0, bytemuck::bytes_of(&self.uni));
 
         let frame = match gfx.surface.get_current_texture() {
@@ -705,6 +911,19 @@ impl App {
         gfx.queue.submit(Some(enc.finish()));
         gfx.queue.present(frame);
 
+        // Stalls only show up as a long gap, so keep the worst one and what caused it.
+        // Anything past half a second is the compositor hiding us, not a slow frame.
+        if dt > self.worst.dt && dt < 0.5 {
+            self.worst = Worst {
+                dt,
+                pulses: self.st.pulses.len(),
+                limbs: seg,
+                flares: self.st.flares.len(),
+                glyphs: self.st.lit.len(),
+                bloom: self.st.bloom.iter().cloned().fold(0.0f32, f32::max),
+            };
+        }
+
         self.fps_n += 1;
         if self.fps_t.elapsed().as_secs_f32() >= 2.0 {
             gfx.window.set_title(&format!(
@@ -715,6 +934,14 @@ impl App {
                 self.st.ss,
                 self.st.ss
             ));
+            let w = self.worst;
+            println!(
+                "  {:5.1} fps   worst frame {:5.2} ms  [pulses {}  limbs {}  flares {}  glyphs {}  bloom {:.2}]",
+                self.fps_n as f32 / self.fps_t.elapsed().as_secs_f32(),
+                w.dt * 1000.0,
+                w.pulses, w.limbs, w.flares, w.glyphs, w.bloom,
+            );
+            self.worst = Worst::default();
             self.fps_n = 0;
             self.fps_t = Instant::now();
         }
@@ -725,7 +952,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, elwt: &ActiveEventLoop) {
         elwt.set_control_flow(ControlFlow::Poll);
         if self.gfx.is_none() {
-            self.gfx = Some(Gfx::new(elwt, &self.uni, &self.src));
+            self.gfx = Some(Gfx::new(elwt, &self.uni, &self.canvas));
             // Timestamps from before the window existed would make the first frame jump.
             self.last = Instant::now();
             self.fps_t = Instant::now();
@@ -812,6 +1039,10 @@ fn main() {
     let fps = cfg.fps.max(1) as f32;
     let loop_secs = cfg.frames as f32 / fps;
     let disc = layers.iter().map(|l| l.outer.max_radius()).fold(0.0f32, f32::max);
+
+    // Walk the artwork once for its letters and symbols, so the viewer can light one.
+    let catalogue = imagespin::glyphs::find(&src, cfg.center, disc);
+    println!("  {} glyphs found in the artwork", catalogue.len());
     let ss = 2;
     let st = State {
         speed: layers.iter().map(|l| l.turns as f32 / loop_secs).collect(),
@@ -833,6 +1064,10 @@ fn main() {
         burst_power: 0.0,
         burst_base: 0.0,
         flash: 0.0,
+        layers: layers.clone(),
+        catalogue,
+        lit: Vec::new(),
+        next_lit: 1.1,
         center: cfg.center,
         disc,
     };
@@ -840,15 +1075,31 @@ fn main() {
     help();
     st.describe();
 
-    let uni = gpu::uniforms(&cfg, &layers, &src, ss);
+    // The linework is drawn over the photograph at a multiple of its size. The rings and
+    // rules stop being limited to the raster grid; the lettering is unchanged until it too
+    // is drawn. Coordinates stay in the photograph's space throughout.
+    let canvas_scale = 2.0;
+    let nominal = [src.width() as f32, src.height() as f32];
+    let canvas = sigil::over(&cfg, &sigil::Figure::default(), &src, canvas_scale);
+    println!(
+        "  canvas {}x{} ({}x the artwork)",
+        canvas.width(),
+        canvas.height(),
+        canvas_scale
+    );
+
+    let uni = gpu::uniforms(&cfg, &layers, &canvas, nominal, ss);
     let mut app = App {
         st,
         uni,
         src,
+        canvas,
+        canvas_scale,
         gfx: None,
         last: Instant::now(),
         fps_t: Instant::now(),
         fps_n: 0,
+        worst: Worst::default(),
     };
 
     EventLoop::new().unwrap().run_app(&mut app).unwrap();

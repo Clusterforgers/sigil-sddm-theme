@@ -28,6 +28,10 @@ struct Args {
     flares: u32,
     /// Lightning limbs in the air, laid out as spokes across the disc.
     bolts: u32,
+    /// Activated glyphs, taken from the ones actually found in the artwork.
+    glyphs: u32,
+    /// How far the activated glyphs have floated, in source pixels.
+    lift: f32,
     frames: u32,
     /// Write the rendered frame here, for checking a change did not alter the picture.
     out: Option<String>,
@@ -43,6 +47,8 @@ fn parse_args() -> Args {
         pulses: 0,
         flares: 0,
         bolts: 0,
+        glyphs: 0,
+        lift: 10.0,
         frames: 120,
         out: None,
         config: "layers.json".into(),
@@ -63,6 +69,8 @@ fn parse_args() -> Args {
             "--pulses" => a.pulses = val().parse().unwrap(),
             "--flares" => a.flares = val().parse().unwrap(),
             "--bolts" => a.bolts = val().parse().unwrap(),
+            "--glyphs" => a.glyphs = val().parse().unwrap(),
+            "--lift" => a.lift = val().parse().unwrap(),
             "--frames" => a.frames = val().parse().unwrap(),
             "--config" => a.config = val().clone(),
             "--out" => a.out = Some(val().clone()),
@@ -94,12 +102,16 @@ fn main() {
     }))
     .unwrap();
 
-    let mut uni = gpu::uniforms(&cfg, &layers, &src, args.ss);
+    // The bench measures the photograph on its own, so canvas and coordinates coincide.
+    let nominal = [src.width() as f32, src.height() as f32];
+    let mut uni = gpu::uniforms(&cfg, &layers, &src, nominal, args.ss);
     // Same aspect-preserving fit the viewer computes for its surface.
     let (sw, sh) = (src.width() as f32, src.height() as f32);
     let (w, h) = (args.width as f32, args.height as f32);
     let scale = (w / sw).min(h / sh);
     uni.fit = [scale, (w - sw * scale) * 0.5, (h - sh * scale) * 0.5, layers.len() as f32];
+    // Same rule the viewer uses, bias included — see `source_lod` in live.rs.
+    uni.misc[0] = (-(scale * args.ss as f32).max(1e-3).log2() - 0.35).max(0.0);
     for i in 0..layers.len() {
         // A fixed angle off the axes, so no layer lands on a degenerate case.
         let a = 0.37 * (i + 1) as f32;
@@ -142,6 +154,63 @@ fn main() {
         let sy = cfg.center[1] + rr * a.cos();
         uni.bolts[i] = [sx, sy, sx + len * dir.sin(), sy + len * dir.cos()];
         uni.bolt_w[i] = [1.0, 3.2, 0.0, 0.0];
+    }
+
+    // A real cluster, chosen the way the viewer chooses one: a seed and its nearest
+    // neighbours. Spreading them over the whole plate would measure a bounding box the
+    // viewer never produces, and would not show what a group looks like either.
+    let cat = imagespin::glyphs::find(&src, cfg.center, disc);
+    let ng = args.glyphs.min(imagespin::gpu::MAX_GLYPHS as u32).min(cat.len() as u32);
+    uni.params[3] = ng as f32;
+    if ng > 0 {
+        let seed = cat[cat.len() / 3];
+        let mut near: Vec<(f32, usize)> = cat
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                let (dx, dy) = (g.pos[0] - seed.pos[0], g.pos[1] - seed.pos[1]);
+                (dx * dx + dy * dy, i)
+            })
+            .collect();
+        near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // Progress is read off the lift, so a still shows the colour and spread a glyph
+        // would have reached by the time it had drifted that far.
+        let progress = (args.lift / 20.0).clamp(0.0, 1.0);
+        let (mut lo, mut hi) = ([f32::MAX; 2], [f32::MIN; 2]);
+        let (mut pl, mut ph) = ([f32::MAX; 2], [f32::MIN; 2]);
+        for (i, &(_, idx)) in near.iter().take(ng as usize).enumerate() {
+            let g = cat[idx];
+            let ext = g.radius + 3.0;
+            uni.glyphs[i] = [g.pos[0], g.pos[1], ext, ext];
+
+            // The bench turns the layers like the viewer does, so the glyph has to be
+            // carried round by its own layer before the rise is added. Assuming artwork
+            // and screen coincide here puts the copy somewhere the shader never looks.
+            let (ax, ay) = (g.pos[0] - cfg.center[0], g.pos[1] - cfg.center[1]);
+            let r = (ax * ax + ay * ay).sqrt();
+            let alpha = (-ax).atan2(-ay);
+            let li = layers.iter().position(|l| l.contains(r, alpha)).unwrap_or(0);
+            let ang = 0.37 * (li + 1) as f32;
+            let (s, c) = (ang.sin(), ang.cos());
+            let (mut px, mut py) = (ax * c + ay * s, ay * c - ax * s);
+            let len = (px * px + py * py).sqrt().max(1e-3);
+            px += px * args.lift / len;
+            py += py * args.lift / len;
+            let risen = [cfg.center[0] + px, cfg.center[1] + py];
+
+            uni.glyph_a[i] = [risen[0], risen[1], 1.0, progress];
+            uni.glyph_r[i] = [s, c, 0.0, 0.0];
+            let reach = ext * (1.0 + 1.6 * progress) + args.lift;
+            for k in 0..2 {
+                lo[k] = lo[k].min(g.pos[k] - reach);
+                hi[k] = hi[k].max(g.pos[k] + reach);
+                pl[k] = pl[k].min(risen[k] - reach);
+                ph[k] = ph[k].max(risen[k] + reach);
+            }
+        }
+        uni.gbox = [lo[0], lo[1], hi[0], hi[1]];
+        uni.gbox_p = [pl[0], pl[1], ph[0], ph[1]];
     }
 
     let gpu = Gpu::new(&device, &queue, FORMAT, &src, &uni);

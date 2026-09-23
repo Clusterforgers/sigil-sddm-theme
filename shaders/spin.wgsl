@@ -17,6 +17,7 @@ const MAX_LAYERS: u32 = 16u;
 const MAX_PULSES: u32 = 8u;
 const MAX_FLARES: u32 = 8u;
 const MAX_BOLT_SEGS: u32 = 96u;
+const MAX_GLYPHS: u32 = 16u;
 
 struct GpuLayer {
     // kind, sides, radius, phase_rad   (kind: 0 circle, 1 poly, 2 star)
@@ -34,10 +35,16 @@ struct Uniforms {
     src_size: vec2<f32>,
     // scale, offset.x, offset.y, n_layers
     fit: vec4<f32>,
-    // supersample, disc radius, glow pyramid top LOD, unused
+    // supersample, disc radius, glow pyramid top LOD, live lit glyphs
     params: vec4<f32>,
     // live pulses, live flares, live bolt segments, collapse flash
     counts: vec4<f32>,
+    // (mip level to read the artwork at, unused, unused, unused)
+    misc: vec4<f32>,
+    // (min x, min y, max x, max y) around the lit glyphs in the artwork
+    gbox: vec4<f32>,
+    // ...and around the risen copies, in un-rotated space
+    gbox_p: vec4<f32>,
     background: vec4<f32>,
     // (crest radius, crest strength, envelope width, ripple wavelength) per pulse
     pulses: array<vec4<f32>, MAX_PULSES>,
@@ -49,6 +56,12 @@ struct Uniforms {
     bolts: array<vec4<f32>, MAX_BOLT_SEGS>,
     // (strength, half-width, unused, unused) for the limb at the same index
     bolt_w: array<vec4<f32>, MAX_BOLT_SEGS>,
+    // (x, y, half-width, half-height) per lit glyph, at where it has floated to
+    glyphs: array<vec4<f32>, MAX_GLYPHS>,
+    // (risen x, risen y, strength of the copy, progress) per glyph, un-rotated space
+    glyph_a: array<vec4<f32>, MAX_GLYPHS>,
+    // (sin, cos) of the angle that glyph own layer has turned to
+    glyph_r: array<vec4<f32>, MAX_GLYPHS>,
     layers: array<GpuLayer, MAX_LAYERS>,
 };
 
@@ -196,6 +209,90 @@ fn flare_at(p: vec2<f32>) -> f32 {
     return acc;
 }
 
+// The gold a glyph runs at once it has been lit: hot and nearly white, so an activated
+// letter reads as charged rather than merely brighter than its neighbours.
+const GLYPH_HOT: vec3<f32> = vec3<f32>(1.0, 0.92, 0.62);
+
+/// Gold through white to violet, as a glyph rises and lets go.
+///
+/// The ramp is compressed into the window where the copy is actually visible. Spread over
+/// the whole life it finished violet at the moment the copy had already faded to nothing,
+/// so the colour change was there but could never be caught.
+fn glyph_colour(t: f32) -> vec3<f32> {
+    let u = clamp(t / 0.55, 0.0, 1.0);
+    let hot = vec3<f32>(1.0, 0.92, 0.62);
+    let white = vec3<f32>(1.0, 1.0, 1.0);
+    let violet = vec3<f32>(0.62, 0.30, 1.0);
+    if (u < 0.45) {
+        return mix(hot, white, u / 0.45);
+    }
+    return mix(white, violet, (u - 0.45) / 0.55);
+}
+
+/// How much of a glyph has left its slot in the artwork.
+///
+/// Tested in `q`, the layer-rotated frame, because that is where the glyph actually sits
+/// and it has to stay with its layer as that turns. Once it is up, the slot is empty —
+/// which is the dark disc an earlier version went out of its way to avoid. That was right
+/// then, when nothing was leaving and it read as a hole punched in the plate; now
+/// something is, and the gap is the point.
+fn glyph_hide(p: vec2<f32>) -> f32 {
+    var acc = 0.0;
+    let n = u32(u.params.w);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let a = u.glyph_a[i];
+        let g = u.glyphs[i];
+        let d = (p - g.xy) / g.zw;
+        let t = max(1.0 - dot(d, d), 0.0);
+        if (t <= 0.0) { continue; }
+        // Up quickly, and back only once the copy has gone.
+        let hide = smoothstep(0.0, 0.12, a.w) * (1.0 - smoothstep(0.72, 1.0, a.w));
+        acc = acc + hide * t;
+    }
+    return min(acc, 1.0);
+}
+
+/// The copy a lit glyph sends up as it lets go.
+///
+/// Worked out in un-rotated space and drawn at the very end, outside the layer loop, so a
+/// copy that has drifted into the next band is neither clipped by that boundary nor
+/// displaced by its different rotation — which is exactly what used to happen.
+///
+/// As it rises it grows, cools, and is read from an ever coarser mip, so it comes apart
+/// rather than merely dimming. The growth divides the offset into the artwork: inflating
+/// the falloff alone only puts a bigger halo around a letter of unchanged size.
+fn glyph_ghost(p: vec2<f32>) -> vec3<f32> {
+    var acc = vec3<f32>(0.0);
+    let n = u32(u.params.w);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let a = u.glyph_a[i];
+        if (a.z <= 0.002) { continue; }
+        let g = u.glyphs[i];
+        let grow = 1.0 + 1.6 * a.w;
+        let ext = g.zw * grow;
+        let local = p - a.xy;
+        let d = local / ext;
+        let t = max(1.0 - dot(d, d), 0.0);
+        if (t <= 0.0) { continue; }
+        // Back into the artwork: undo the layer rotation, then undo the growth. Without
+        // the rotation the copy would sit at whatever angle its layer happened to be at,
+        // and could face the wrong way up entirely.
+        let rot = u.glyph_r[i];
+        let art = vec2<f32>(
+            local.x * rot.y - local.y * rot.x,
+            local.y * rot.y + local.x * rot.x,
+        ) / grow;
+        let uv = (g.xy + art) / u.src_size;
+        let ink = textureSampleLevel(src_tex, src_smp, uv, u.misc.x + a.w * 2.5).rgb;
+        // The ink supplies the shape and the ramp supplies the colour. Tinting the ink
+        // itself cannot work: it is gold, so it has no blue for a violet to scale, and the
+        // ramp would only ever come out as a duller orange.
+        let lum = dot(ink, vec3<f32>(0.299, 0.587, 0.114));
+        acc = acc + glyph_colour(a.w) * (lum * a.z * t * t * 1.6);
+    }
+    return acc;
+}
+
 /// Squared distance from `p` to the segment `a`-`b`.
 fn seg_dist2(p: vec2<f32>, a: vec2<f32>, b: vec2<f32>) -> f32 {
     let ab = b - a;
@@ -262,8 +359,35 @@ fn spill(q: vec2<f32>, amount: f32, tint: vec3<f32>) -> vec3<f32> {
     return tint * (acc * 0.25) * amount * 1.7;
 }
 
+/// Everything that lives in un-rotated space and varies smoothly across one pixel.
+///
+/// These are the expensive loops — the limb list especially, which can run to fifty-odd
+/// entries during an implosion — and none of them is a function of which layer a sub-sample
+/// lands in. So they are worked out once at the pixel centre and shared, instead of four
+/// times over at `ss=2`. The layer search and the artwork lookup still get supersampled,
+/// because that is where the detail actually is.
+///
+/// The glyphs deliberately stay out of this: they are positioned in the artwork and ride
+/// their layer as it turns, so they have to be tested in rotated space, per sub-sample.
+struct Fields {
+    // body, lit rim, trough, refraction
+    blood: vec4<f32>,
+    // hot core, blue halo
+    arc: vec2<f32>,
+    flare: f32,
+};
+
+fn fields_at(p: vec2<f32>) -> Fields {
+    let d = p - u.center;
+    var f: Fields;
+    f.blood = pulse_at(length(d));
+    f.arc = bolt_at(p);
+    f.flare = flare_at(p);
+    return f;
+}
+
 // Colour of one sub-sample, given a point in SOURCE pixel coordinates.
-fn shade(p: vec2<f32>) -> vec3<f32> {
+fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
     let d = p - u.center;
     let r2 = dot(d, d);
     // Nothing is drawn past the outermost boundary; most of the window is out here.
@@ -274,15 +398,12 @@ fn shade(p: vec2<f32>) -> vec3<f32> {
     // alpha measured from North, CCW: dx = -r sin a, dy = -r cos a
     let alpha = atan2(-d.x, -d.y);
 
-    // Where the energy is depends on the pixel, not on which layer ends up owning it,
-    // so it is worth resolving before the search rather than inside it.
-    let blood = pulse_at(r);
-    let red = blood.x;
-    let edge = blood.y;
-    let trough = blood.z;
-    let warp = blood.w;
-    let arc = bolt_at(p);
-    let blue = arc.y + flare_at(p);
+    let red = f.blood.x;
+    let edge = f.blood.y;
+    let trough = f.blood.z;
+    let warp = f.blood.w;
+    let arc = f.arc;
+    let blue = arc.y + f.flare;
 
     var col = u.background.rgb;
     let n = u32(u.fit.w);
@@ -307,6 +428,14 @@ fn shade(p: vec2<f32>) -> vec3<f32> {
             let c = L.motion.w;
             let q = u.center + vec2<f32>(d.x * c - d.y * s, d.y * c + d.x * s);
 
+            // One box around the lit glyphs, tested once. The groups are clusters by
+            // construction, so it is tight and almost every pixel leaves here.
+            var hide = 0.0;
+            if (u.params.w > 0.0 && q.x >= u.gbox.x && q.y >= u.gbox.y
+                && q.x <= u.gbox.z && q.y <= u.gbox.w) {
+                hide = glyph_hide(q);
+            }
+
             // The wave is a lens: push the point we sample along the radius by however
             // much the surface above it is tilted. Rotation preserves radius, so
             // displacing radially here needs no correction for the layer's own angle.
@@ -320,7 +449,15 @@ fn shade(p: vec2<f32>) -> vec3<f32> {
             if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) {
                 break;
             }
-            col = textureSampleLevel(src_tex, src_smp, uv, 0.0).rgb;
+            // Read the artwork at a level matched to how hard it is being shrunk. The
+            // window decides that, not the pixel, so the level is worked out once on the
+            // CPU — and the sampler cannot work it out for itself here anyway, since this
+            // sits inside a loop that breaks.
+            col = textureSampleLevel(src_tex, src_smp, uv, u.misc.x).rgb;
+
+            // A glyph that has lifted off leaves its slot empty; the copy is drawn
+            // somewhere else entirely, at the end, in a frame this loop cannot clip.
+            col = col * (1.0 - hide);
 
             // The dip ahead of the crest. A ring needs a hard outer boundary to read as
             // one, and darkening is the only way to draw an edge on artwork this sparse.
@@ -348,7 +485,8 @@ fn shade(p: vec2<f32>) -> vec3<f32> {
                 col = col + spill(
                     q,
                     amt,
-                    (GLOW * b + BLOOD * red + SPARK * blue + BLOOD_HOT * (edge * 0.6)) / amt,
+                    (GLOW * b + BLOOD * red + SPARK * blue + BLOOD_HOT * (edge * 0.6))
+                        / amt,
                 );
                 // A little lands on the ground and not just on the strokes, so a passing
                 // wave reads as a wave rather than as a row of briefly brighter glyphs.
@@ -365,9 +503,16 @@ fn shade(p: vec2<f32>) -> vec3<f32> {
     // The whole formation answers when an implosion lands.
     col = col + col * (u.counts.w * 0.9) + BLOOD_HOT * (u.counts.w * 0.05);
 
-    // The arc core is the light source itself rather than something lighting the
-    // artwork, so it goes over the top of whatever the pixel turned out to be.
-    return col + SPARK_CORE * arc.x;
+    // The arc cores and the risen glyphs are light sources in their own right rather
+    // than things lighting the artwork, so they go over the top of whatever the pixel
+    // turned out to be — and, just as importantly, outside the layer loop, so a copy that
+    // has drifted into the next band is not clipped or displaced by it.
+    var risen = vec3<f32>(0.0);
+    if (u.params.w > 0.0 && p.x >= u.gbox_p.x && p.y >= u.gbox_p.y
+        && p.x <= u.gbox_p.z && p.y <= u.gbox_p.w) {
+        risen = glyph_ghost(p);
+    }
+    return col + SPARK_CORE * arc.x + risen;
 }
 
 @vertex
@@ -380,16 +525,35 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 
 @fragment
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    // A uniform grid, deliberately. A rotated grid is the usual improvement, but it only
+    // pays for geometric edges, and this renderer has none worth the name: the disc cut and
+    // every layer boundary sit in empty gaps by construction, so all the visible detail is
+    // texture. Measured, the rotated grid was simply a wider filter — slightly less
+    // high-frequency energy, but further from a brute-force reference, which is the wrong
+    // trade when the complaint is blur.
     let ss = i32(u.params.x);
     let base = floor(pos.xy);
     var acc = vec3<f32>(0.0);
+
+    // Resolved once at the pixel centre and shared by every sub-sample.
+    //
+    // Guarded by the same disc test `shade` uses, because most of a window is outside the
+    // plate and none of this applies there. Without the guard, hoisting hands the empty
+    // frame a bill it never used to pay, and for a handful of limbs that costs more than
+    // the sharing saves.
+    let centre = (base + vec2<f32>(0.5) - u.fit.yz) / u.fit.x;
+    let cd = centre - u.center;
+    var f: Fields;
+    if (dot(cd, cd) < u.params.y * u.params.y) {
+        f = fields_at(centre);
+    }
 
     for (var j = 0; j < ss; j = j + 1) {
         for (var i = 0; i < ss; i = i + 1) {
             let off = (vec2<f32>(f32(i), f32(j)) + 0.5) / f32(ss);
             // window pixel -> source pixel (aspect-preserving fit)
             let p = (base + off - u.fit.yz) / u.fit.x;
-            acc = acc + shade(p);
+            acc = acc + shade(p, f);
         }
     }
     return vec4<f32>(acc / f32(ss * ss), 1.0);

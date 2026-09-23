@@ -8,5 +8,7 @@ pub mod config;
 pub mod fit;
 pub mod geom;
 pub mod gifout;
+pub mod glyphs;
 pub mod gpu;
 pub mod render;
+pub mod sigil;

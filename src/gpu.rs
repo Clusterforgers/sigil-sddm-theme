@@ -18,7 +18,10 @@ pub const MAX_PULSES: usize = 8;
 /// Afterglows left where lightning struck that can be alight at once.
 pub const MAX_FLARES: usize = 8;
 
-/// Limbs of lightning — across every live bolt — that can be drawn at once.
+/// Glyphs that can be lit and lifted off the plate at once.
+pub const MAX_GLYPHS: usize = 16;
+
+/// Limbs of lightning/// Limbs of lightning — across every live bolt — that can be drawn at once.
 ///
 /// Large enough for the fan an implosion throws out of the centre, which is far more
 /// lightning at once than the wandering strikes ever produce.
@@ -41,10 +44,17 @@ pub struct Uniforms {
     pub src_size: [f32; 2],
     /// scale, offset.x, offset.y, n_layers
     pub fit: [f32; 4],
-    /// supersample, disc radius, glow pyramid top LOD, unused
+    /// supersample, disc radius, glow pyramid top LOD, live lit glyphs
     pub params: [f32; 4],
     /// live pulses, live flares, live bolt segments, collapse flash
     pub counts: [f32; 4],
+    /// (mip level to read the artwork at, unused, unused, unused)
+    pub misc: [f32; 4],
+    /// (min x, min y, max x, max y) around the lit glyphs where they sit in the
+    /// artwork, for skipping the pass that hides them
+    pub gbox: [f32; 4],
+    /// ...and the same around the risen copies, in un-rotated screen space
+    pub gbox_p: [f32; 4],
     pub background: [f32; 4],
     /// (crest radius, crest strength, envelope width, ripple wavelength) per pulse,
     /// in source pixels
@@ -58,6 +68,16 @@ pub struct Uniforms {
     pub bolts: [[f32; 4]; MAX_BOLT_SEGS],
     /// (strength, half-width, unused, unused) for the limb at the same index
     pub bolt_w: [[f32; 4]; MAX_BOLT_SEGS],
+    /// (x, y, half-width, half-height) per lit glyph, at the position it actually
+    /// occupies in the artwork; the risen copy works out its own offset from there
+    pub glyphs: [[f32; 4]; MAX_GLYPHS],
+    /// (risen x, risen y, how strongly the copy shows, how far through its life it
+    /// is). The position is un-rotated screen space, because the copy has left its layer
+    /// and must not be clipped by it.
+    pub glyph_a: [[f32; 4]; MAX_GLYPHS],
+    /// (sin, cos, unused, unused) of the angle that glyph's own layer has turned to. The
+    /// copy needs it to keep the letter the right way up as the layer rotates.
+    pub glyph_r: [[f32; 4]; MAX_GLYPHS],
     pub layers: [GpuLayer; MAX_LAYERS],
 }
 
@@ -95,7 +115,17 @@ pub fn ordered_layers(cfg: &Config) -> Vec<Layer> {
 }
 
 /// Everything in the uniform block that does not change from frame to frame.
-pub fn uniforms(cfg: &Config, layers: &[Layer], src: &RgbImage, ss: u32) -> Uniforms {
+/// `canvas` is the texture that will be uploaded; `nominal` is the coordinate space
+/// `layers.json` is written in. They differ once the linework is drawn over the photograph
+/// at a multiple of its size — the texture gets denser, the coordinates do not move. Every
+/// lookup is in normalised uv, so nothing downstream needs to know which is which.
+pub fn uniforms(
+    cfg: &Config,
+    layers: &[Layer],
+    canvas: &RgbImage,
+    nominal: [f32; 2],
+    ss: u32,
+) -> Uniforms {
     assert!(layers.len() <= MAX_LAYERS, "at most {MAX_LAYERS} layers");
     let bg = parse_hex(&cfg.background);
     // Nothing is drawn past the outermost boundary, so the shader can stop there.
@@ -103,10 +133,18 @@ pub fn uniforms(cfg: &Config, layers: &[Layer], src: &RgbImage, ss: u32) -> Unif
 
     let mut uni = Uniforms {
         center: cfg.center,
-        src_size: [src.width() as f32, src.height() as f32],
+        src_size: nominal,
         fit: [1.0, 0.0, 0.0, layers.len() as f32],
-        params: [ss as f32, disc, (glow_levels(src.width(), src.height()) - 1) as f32, 0.0],
+        params: [
+            ss as f32,
+            disc,
+            (glow_levels(canvas.width(), canvas.height()) - 1) as f32,
+            0.0,
+        ],
         counts: [0.0; 4],
+        misc: [0.0; 4],
+        gbox: [0.0; 4],
+        gbox_p: [0.0; 4],
         // The texture is sRGB, so linearise the background to match what it decodes to.
         background: [
             srgb_to_linear(bg[0]),
@@ -119,6 +157,9 @@ pub fn uniforms(cfg: &Config, layers: &[Layer], src: &RgbImage, ss: u32) -> Unif
         flares: [[0.0; 4]; MAX_FLARES],
         bolts: [[0.0; 4]; MAX_BOLT_SEGS],
         bolt_w: [[0.0; 4]; MAX_BOLT_SEGS],
+        glyphs: [[0.0; 4]; MAX_GLYPHS],
+        glyph_a: [[0.0; 4]; MAX_GLYPHS],
+        glyph_r: [[0.0; 4]; MAX_GLYPHS],
         layers: [GpuLayer::default(); MAX_LAYERS],
     };
     for (i, l) in layers.iter().enumerate() {
@@ -150,6 +191,66 @@ fn highlight(px: &image::Rgb<u8>) -> f32 {
 /// Number of levels in the glow pyramid for a source of this size.
 pub fn glow_levels(w: u32, h: u32) -> u32 {
     32 - w.max(h).max(1).leading_zeros()
+}
+
+/// The inverse of `srgb_to_linear`, for writing filtered values back into an sRGB texture.
+fn linear_to_srgb(v: f32) -> u8 {
+    let c = v.clamp(0.0, 1.0);
+    let s = if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    (s * 255.0).round() as u8
+}
+
+/// The artwork and its mip chain, as RGBA, concatenated smallest-last.
+///
+/// Without this the viewer samples the artwork at level 0 whatever the window is doing, and
+/// at the sizes people actually use the disc is *minified* — at 714x427 the fit scale is
+/// 0.357, so even at `ss=2` that is 0.71 texels per sample. Thin gold lines then get point
+/// sampled and crawl. A prefiltered chain costs nothing when the disc is magnified and is
+/// the whole difference when it is not.
+///
+/// The filtering happens in **linear** light. The texture is `Rgba8UnormSrgb`, so averaging
+/// the stored bytes would be averaging the wrong quantity and would quietly shift the
+/// artwork's brightness as it shrank.
+pub fn source_pyramid(src: &RgbImage) -> (Vec<u8>, u32) {
+    let (mut w, mut h) = (src.width(), src.height());
+    // Work in linear light, three channels, and only encode on the way out.
+    let mut level: Vec<[f32; 3]> = src
+        .pixels()
+        .map(|p| [srgb_to_linear(p.0[0]), srgb_to_linear(p.0[1]), srgb_to_linear(p.0[2])])
+        .collect();
+
+    let encode = |lv: &[[f32; 3]]| -> Vec<u8> {
+        lv.iter()
+            .flat_map(|c| {
+                [linear_to_srgb(c[0]), linear_to_srgb(c[1]), linear_to_srgb(c[2]), 255]
+            })
+            .collect::<Vec<u8>>()
+    };
+
+    let mut out = encode(&level);
+    let mut levels = 1u32;
+    while w > 1 || h > 1 {
+        let (nw, nh) = ((w / 2).max(1), (h / 2).max(1));
+        let mut next = vec![[0.0f32; 3]; (nw * nh) as usize];
+        for y in 0..nh {
+            for x in 0..nw {
+                // Box filter, clamping at odd edges so no source pixel is dropped.
+                let (x0, y0) = (2 * x, 2 * y);
+                let (x1, y1) = ((x0 + 1).min(w - 1), (y0 + 1).min(h - 1));
+                let at = |px: u32, py: u32| level[(py * w + px) as usize];
+                let (a, b, c, d) = (at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1));
+                for k in 0..3 {
+                    next[(y * nw + x) as usize][k] = (a[k] + b[k] + c[k] + d[k]) * 0.25;
+                }
+            }
+        }
+        out.extend_from_slice(&encode(&next));
+        level = next;
+        w = nw;
+        h = nh;
+        levels += 1;
+    }
+    (out, levels)
 }
 
 /// The highlight map and its box-filtered mip chain, concatenated smallest-last.
@@ -205,14 +306,15 @@ impl Gpu {
     ) -> Self {
         let (sw, sh) = (src.width(), src.height());
 
-        // Source image as an sRGB texture.
-        let rgba: Vec<u8> = src.pixels().flat_map(|p| [p.0[0], p.0[1], p.0[2], 255]).collect();
+        // Source image as an sRGB texture, prefiltered so it can be minified without
+        // the thin lines crawling.
+        let (rgba, src_levels) = source_pyramid(src);
         let tex = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {
                 label: Some("sigil"),
                 size: wgpu::Extent3d { width: sw, height: sh, depth_or_array_layers: 1 },
-                mip_level_count: 1,
+                mip_level_count: src_levels,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -404,5 +506,6 @@ mod tests {
         assert_eq!(declared("MAX_PULSES"), MAX_PULSES, "MAX_PULSES");
         assert_eq!(declared("MAX_FLARES"), MAX_FLARES, "MAX_FLARES");
         assert_eq!(declared("MAX_BOLT_SEGS"), MAX_BOLT_SEGS, "MAX_BOLT_SEGS");
+        assert_eq!(declared("MAX_GLYPHS"), MAX_GLYPHS, "MAX_GLYPHS");
     }
 }

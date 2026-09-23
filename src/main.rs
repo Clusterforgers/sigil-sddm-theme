@@ -1,4 +1,4 @@
-use imagespin::{config, fit, gifout, render};
+use imagespin::{config, fit, gifout, glyphs, render, sigil};
 use config::{parse_hex, Config};
 
 use clap::{Parser, Subcommand};
@@ -50,6 +50,25 @@ enum Cmd {
         top: usize,
     },
 
+    /// Find the individual letters and symbols, and mark what was found.
+    Glyphs {
+        #[arg(long, default_value = "glyphs.png")]
+        out: String,
+    },
+    /// Draw the sigil procedurally instead of reading the source image.
+    Draw {
+        #[arg(long, default_value = "sigil.png")]
+        out: String,
+        /// Canvas multiple of the coordinates layers.json is written in.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f32,
+        /// Blend the drawing over the source image, to check the two line up.
+        #[arg(long)]
+        over_source: bool,
+        /// Draw the linework on top of the photograph, rather than on its own.
+        #[arg(long)]
+        composite: bool,
+    },
     /// Render the animated GIF.
     Render {
         #[arg(long, default_value = "spin.gif")]
@@ -142,6 +161,52 @@ fn main() {
             fit::scan(&src, (cfg.center[0], cfg.center[1]), sides, rmin, rmax, top);
         }
 
+        Cmd::Glyphs { out } => {
+            let disc = cfg.layers.iter().map(|l| l.outer.max_radius()).fold(0.0f32, f32::max);
+            let found = glyphs::find(&src, cfg.center, disc);
+            println!("  found {} glyphs", found.len());
+            let mut img = src.clone();
+            for g in &found {
+                // Ring each one, so what was picked up and what was missed is obvious.
+                let steps = 64;
+                for i in 0..steps {
+                    let a = TAU * i as f32 / steps as f32;
+                    let x = g.pos[0] + g.radius * a.cos();
+                    let y = g.pos[1] + g.radius * a.sin();
+                    if x >= 0.0 && y >= 0.0 && x < img.width() as f32 && y < img.height() as f32 {
+                        img.put_pixel(x as u32, y as u32, Rgb([0, 255, 255]));
+                    }
+                }
+            }
+            img.save(&out).unwrap_or_else(|e| panic!("cannot write {out}: {e}"));
+            println!("  wrote {out}");
+        }
+        Cmd::Draw { out, scale, over_source, composite } => {
+            let fig = sigil::Figure::default();
+            let mut img = if composite {
+                sigil::over(&cfg, &fig, &src, scale)
+            } else {
+                sigil::draw(&cfg, &fig, scale)
+            };
+            if over_source {
+                // Half the source, half the drawing: anything misplaced shows up as a
+                // doubled line rather than having to be spotted by memory.
+                let s = image::imageops::resize(
+                    &src,
+                    img.width(),
+                    img.height(),
+                    image::imageops::FilterType::Lanczos3,
+                );
+                for (p, q) in img.pixels_mut().zip(s.pixels()) {
+                    // Drawing in red, source in green, so overlap reads as yellow.
+                    let drawn = p.0[0].max(p.0[1]);
+                    let orig = q.0[0].max(q.0[1]);
+                    p.0 = [drawn, orig, 0];
+                }
+            }
+            img.save(&out).unwrap_or_else(|e| panic!("cannot write {out}: {e}"));
+            println!("wrote {out}  ({}x{})", img.width(), img.height());
+        }
         Cmd::Render { out, frames, colors, ss, png_frames, tol, loop_check } => {
             let n = frames.unwrap_or(cfg.frames);
             let ncol = colors.unwrap_or(cfg.colors);

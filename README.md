@@ -184,6 +184,136 @@ measured at runtime, not estimated: 51 limbs. Two tests pin the things that woul
 otherwise break silently — that the uniform block still fits `downlevel_defaults`, and
 that the array lengths the WGSL declares still match the Rust ones.
 
+### Activation
+
+Letters and symbols light up in **groups** and lift off the plate. A seed glyph is picked
+and its nearest neighbours go with it, each held back a little longer than the last, so the
+cluster ripples outward from the seed rather than snapping on together. Groups are spaced
+out in time on purpose — back to back they overlap into a permanent wash, which costs more
+and reads as less.
+
+The glyph **leaves its slot**: the copy is what rises, and where it came from goes dark
+until it is finished. An earlier version kept the original in place and went out of its way
+to avoid that gap, because a hole punched in the plate with nothing leaving it looked like
+a bug. Now something is leaving, so the gap is the whole point.
+
+The copy is drawn **outside the layer loop**, in un-rotated space, at the very end of
+`shade` beside the arc cores. It used to be worked out in `q`, the layer-rotated frame, and
+added inside the loop — so the moment it drifted across a band boundary it was clipped by
+that boundary and displaced by the neighbouring band's different rotation. It needs the
+angle of its own layer all the same (`glyph_r`), or the letter would sit at whatever angle
+that layer happened to have reached and could face the wrong way up entirely.
+
+As it rises it **grows, cools from gold through white to violet, and comes apart**, read
+from an ever coarser mip as it travels. Two things about that are worth keeping:
+
+- The growth divides the offset into the artwork. Inflating the falloff alone — which is
+  what it did at first — only puts a bigger halo around a letter of unchanged size.
+- The colour ramp is compressed into the window where the copy is actually visible. Spread
+  over the whole life it reached violet exactly when the copy had already faded to nothing,
+  so the change was there and could never be caught.
+
+Nothing in the pipeline knew where a glyph *was* — the source is a picture and the shader
+only ever asks it for the colour at a point. `glyphs::find` walks the artwork once at
+startup and flood-fills the lit pixels, keeping the blobs small enough to be a glyph rather
+than part of the ruling: **279** of them in 35 ms. A letter touching a cell divider merges
+into the line network and is dropped, which is the right failure — a glyph floating off with
+a piece of ruling attached would look like a mistake. Several names come back as whole
+words, which reads better than single letters.
+
+Two bounding boxes are tested before either glyph pass runs, one per frame: the glyphs are
+hidden where they sit in the artwork, the copies are drawn in un-rotated space, and the two
+do not coincide once the layers have turned.
+
+### The canvas
+
+What gets uploaded is not the photograph. The linework is **drawn over it** at twice its
+size, so the rings and rules are paths rather than pixels; the lettering is still the
+photograph until it too is drawn.
+
+This is worth doing because magnification cannot be filtered away. Rendered at 2.88x, our
+output is indistinguishable from a Lanczos upscale of the same region — both show the same
+scalloped edge, because the source's own edge ramp is only ~1.5 px wide. Sampling cannot
+recover an edge that was never captured. Drawing the line does, because a line is geometry.
+The drawn stroke has to be at least as wide as the one underneath, or the ragged original
+shows along its edges.
+
+The texture is therefore denser than the coordinate space `layers.json` is written in. Every
+lookup is in normalised uv so nothing downstream cares, but two things do: `src_size` stays
+the coordinate space, and `source_lod` shifts by a level per doubling of the canvas.
+
+Note also, measured rather than assumed: supersampling **does** still earn its keep while
+magnifying — `ss=1` is four times further from an `ss=8` reference than `ss=2` — so it
+cannot be traded away for speed.
+
+### Sampling the artwork
+
+The artwork is a raster, so how it is *read* matters as much as what is in it.
+
+It carries a **mip chain**, built in `source_pyramid`. Without one the viewer reads level 0
+whatever the window is doing, and at the sizes people actually use the disc is *minified* —
+at 714x427 the fit scale is 0.357, so even at `ss=2` that is 0.71 texels per sample. Thin
+gold lines then get point sampled and crawl. The chain costs nothing when the disc is
+magnified and is the whole difference when it is not.
+
+The filtering happens in **linear light**. The texture is `Rgba8UnormSrgb`, so averaging the
+stored bytes would average the wrong quantity and quietly shift the artwork's brightness as
+it shrank.
+
+The level is worked out on the CPU (`source_lod`), because it depends only on the window and
+because the sampler cannot derive it for itself inside a loop that breaks. The `-0.35` bias
+on it is not a fudge: trilinear blends toward a full 2x2 box, a wider filter than the
+footprint calls for, so the straight `-log2` over-blurs. Fitted against a brute-force `ss=8`
+render, `-0.35` beats both level 0 and an unbiased level on closeness to that reference
+*and* on high-frequency energy, at 714x427 and 500x300 alike:
+
+| | closeness to `ss=8` | high-frequency energy |
+| --- | --- | --- |
+| level 0 (before) | 0.0067 | 0.406 |
+| unbiased | 0.0098 | — |
+| **-0.35** | **0.0050** | **0.384** |
+
+The supersample pattern stays a uniform grid, deliberately. A rotated grid is the usual
+improvement, but it only pays for geometric edges, and this renderer has none worth the
+name: the disc cut and every layer boundary sit in empty gaps by construction, so all the
+visible detail is texture. Measured, the rotated grid was simply a wider filter — slightly
+less high-frequency energy, but further from the reference, which is the wrong trade when
+the complaint is blur.
+
+### Resolving the fields once per pixel
+
+`pulse_at`, `bolt_at` and `flare_at` all live in un-rotated space, so none of them depends
+on which layer a sub-sample lands in. They are resolved once at the pixel centre and shared,
+instead of four times over at `ss=2` — and the limb list runs to fifty-odd entries during an
+implosion, which made it far and away the dominant cost. The layer search and the artwork
+lookup are still supersampled, because that is where the detail is.
+
+It is guarded by the same disc test `shade` uses. Without that guard, hoisting hands the
+empty frame outside the plate a bill it never used to pay, and for a handful of limbs that
+costs more than the sharing saves — measured going the wrong way by 0.8 ms before the guard
+went in.
+
+Interleaved against the same build without it, at 1434x829 `ss=2`:
+
+| | before | after |
+| --- | --- | --- |
+| idle | 1.33 ms | 1.18 ms |
+| two ripples | 2.03 ms | 1.83 ms |
+| + 6 limbs | 3.66 ms | 3.46 ms |
+| + 36 limbs | 10.01 ms | **2.67 ms** |
+
+The glyphs stay out of it: they are positioned in the artwork and ride their layer as it
+turns, so they have to be tested in rotated space, per sub-sample. They get the bounding box
+instead.
+
+The bolt cores were the risk — hoisting means one sample per pixel on a thin bright
+filament — but at RMSE 0.00025 the two are indistinguishable. They are four to six pixels
+wide on screen, which is plenty.
+
+In the viewer this is the difference between dropping a frame in most two-second intervals
+and holding 120 fps. What is left is an isolated drop every few seconds, which tracks the
+compositor and an animated wallpaper rather than anything here.
+
 ### Keeping the pixel cost down
 
 A full-screen window is much larger than the disc, and the disc is mostly flat ground, so
@@ -213,6 +343,34 @@ cargo run --release --bin bench -- --ss 2 --bloom 1 --out frame.png  # and check
 The fragment shader in `shaders/spin.wgsl` is otherwise the same inverse map as
 `src/render.rs` — keep the two in step if you change `Boundary::radius_at`. The GIF path
 does not bloom; it renders the artwork plain.
+
+## Drawing the figure
+
+`images/1.png` is a raster, and the disc occupies only 820 of its 2000 px, so a
+full-screen window magnifies it 1.44x and the small text goes soft. `src/sigil.rs` draws
+the figure instead, at any scale:
+
+```
+imagespin draw --scale 3 --out sigil.png
+imagespin draw --over-source            # drawing in red over the source in green
+imagespin glyphs                        # ring every letter and symbol that was found
+```
+
+So far it draws only the line work — the gold band, the two circles, the 40-cell ring, the
+names heptagon, the heptagram, the nested heptagons and the pentagram. The text and the
+crosses are still to come, so the viewer deliberately does not use it yet.
+
+The radii came from a radial brightness sweep (406.5, 393.5, 384, 352) and from
+`imagespin fit`, and they are **not** the ones in `layers.json`: those are cut lines,
+placed in the empty gaps *between* drawn rings, which is what stops the animation tearing
+through artwork.
+
+One trap is worth knowing about. `Boundary::Poly(n, r, phase)` puts the **apothem** at
+`phase` — a flat edge faces that way, with the vertices half a step to either side —
+although `geom.rs` describes it as a vertex. Drawing a polygon half a step out of step
+with the boundary meant to cut around it is invisible in a still and obvious the moment it
+rotates. `imagespin check` catches it: against a correct drawing it reports every divider
+clean, exactly as it does for the photograph.
 
 ## Tuning a different image
 
