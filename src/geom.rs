@@ -55,6 +55,27 @@ impl Boundary {
         }
     }
 
+    /// Smallest radius this boundary ever reaches.
+    ///
+    /// With `max_radius` this brackets the boundary over every angle. The viewer tests a
+    /// pixel's radius against the bracket first and only evaluates `radius_at` when that
+    /// leaves the answer open, which saves the trigonometry on most pixels.
+    pub fn min_radius(self) -> f32 {
+        match self {
+            Boundary::Circle(r) => r,
+            // The apothem: where a flat edge comes closest to the centre.
+            Boundary::Poly(n, r, _) => {
+                if r <= 0.0 {
+                    0.0
+                } else {
+                    r * (PI / n).cos()
+                }
+            }
+            // The notches between the points.
+            Boundary::Star(_, ro, ri, _) => if ro <= 0.0 { 0.0 } else { ri },
+        }
+    }
+
     /// Largest radius this boundary ever reaches — used for bounding boxes.
     pub fn max_radius(self) -> f32 {
         match self {
