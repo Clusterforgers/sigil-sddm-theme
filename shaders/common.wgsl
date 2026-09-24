@@ -14,6 +14,8 @@ struct GpuLayer {
     motion: vec4<f32>,
     // nearest ink, furthest ink, unused, unused — radii from the centre
     extent: vec4<f32>,
+    // scale, opacity, unused, unused — (1, 1) at rest; the surge flings and fades them
+    form: vec4<f32>,
 };
 
 struct GpuPulse {
@@ -56,7 +58,7 @@ struct Uniforms {
     quality: vec4<f32>,
     // live pulses, live flares, live limbs, live glyphs
     live: vec4<f32>,
-    // collapse flash, layer-tint strength, unused, unused
+    // collapse flash, layer-tint strength, explosion flash, unused
     look: vec4<f32>,
     // (min x, min y, max x, max y) around the lit glyphs in the artwork
     gbox: vec4<f32>,

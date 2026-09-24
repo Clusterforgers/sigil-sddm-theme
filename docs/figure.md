@@ -57,18 +57,23 @@ seconds between one occurrence and the next. Write a single number for an exact 
 
 ```json5
 effects: {
-  drops:      { every: [2.6, 4.8] },   // blood dropping into the middle
   implosions: { every: [12, 22] },     // a ring closing in from the rim, then a burst of lightning
   lightning:  { every: [0.08, 0.35], lulls: { chance: 0.22, last: [0.7, 1.6] } },
   glyphs:     { every: [1.2, 2.8] },   // a cluster of letters lighting up and lifting off
+  surge:      { charge: 1.8, break: 1.4, hold: 1.2, reform: 1.6, stay_broken: false },
 }
 ```
 
 - **Turning an effect off:** `enabled: false` stops it, e.g. `glyphs: { enabled: false }`.
 - **Lightning lulls:** after each strike there is a `chance` that the next wait is a lull
   lasting `last` instead of the usual `every`. Set `chance: 0` for a steady rattle.
-- **Keys still work:** effects you trigger yourself, such as Enter's heavy drop, happen
-  whatever the timings say.
+- **The surge (Enter):** blood drops and the figure spins up and gathers light for `charge`
+  seconds. Then it explodes in a white flash and a burst of lightning, and the layers fly
+  apart and fade over `break`. It stays gone for `hold`, then comes back together over
+  `reform`. With `stay_broken: true` it never comes back, which is what a login screen
+  wants. Pressing Enter again while it runs does nothing.
+- **Previewing it without a window:** `cargo run --release --bin bench -- --surge 1.9 --out
+  frame.png` renders the moment 1.9 s after Enter.
 - **Live editing:** in the viewer, saving the file restarts every schedule, so a shorter
   wait takes effect at once.
 

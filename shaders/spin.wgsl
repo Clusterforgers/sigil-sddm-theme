@@ -32,6 +32,9 @@ fn fields_at(p: vec2<f32>) -> Fields {
 // in from up to this far, and the bloom spills about as far again.
 const LAYER_REACH: f32 = 16.0;
 
+// The colour of the surge's explosion: white, a touch warm, as if the gold burned out.
+const BLAST: vec3<f32> = vec3<f32>(1.0, 0.93, 0.80);
+
 // Colour of one sub-sample, given a point in canvas coordinates.
 //
 // Every layer is its own image, so the layers are stacked bottom to top like sheets of
@@ -63,14 +66,20 @@ fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
     for (var k: u32 = 0u; k < n; k = k + 1u) {
         let L = u.layers[k];
 
+        // A layer the surge has faded out is not there at all...
+        if (L.form.y <= 0.002) { continue; }
+        // ...and one it has flung outward is the same layer seen at a smaller radius.
+        let dl = d / L.form.x;
+        let rl = r / L.form.x;
+
         // The radius alone rules most layers out without touching a texture.
-        if (r < L.extent.x - LAYER_REACH || r > L.extent.y + LAYER_REACH) { continue; }
+        if (rl < L.extent.x - LAYER_REACH || rl > L.extent.y + LAYER_REACH) { continue; }
 
         // Un-turning the pixel by the layer's angle is just rotating the offset the other
         // way, so the precomputed sin/cos replace two more trig calls.
         let s = L.motion.z;
         let c = L.motion.w;
-        let q = u.center + vec2<f32>(d.x * c - d.y * s, d.y * c + d.x * s);
+        let q = u.center + vec2<f32>(dl.x * c - dl.y * s, dl.y * c + dl.x * s);
 
         // The wave is a lens: push the point we sample along the radius by however much
         // the surface above it is tilted. Rotation preserves radius, so displacing
@@ -91,6 +100,8 @@ fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
             && q.x <= u.gbox.z && q.y <= u.gbox.w) {
             ink = ink * (1.0 - glyph_hide(q, k));
         }
+
+        ink = ink * L.form.y;
 
         // Which layer this is, said in colour. Only the hue is replaced.
         if (u.look.y > 0.0) {
@@ -113,7 +124,7 @@ fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
         let amt = b + red + blue + edge * 0.6;
         if (amt > 0.002) {
             let tint = (GLOW * b + BLOOD * red + SPARK * blue + BLOOD_HOT * (edge * 0.6)) / amt;
-            glow = glow + spill(q, k, amt, tint);
+            glow = glow + spill(q, k, amt, tint) * L.form.y;
         }
     }
 
@@ -195,5 +206,14 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
             acc = acc + shade(p, f);
         }
     }
-    return vec4<f32>(acc / f32(ss * ss), 1.0);
+    var col = acc / f32(ss * ss);
+
+    // The surge's explosion: a white-hot flash, blinding at the centre and washing over
+    // the whole screen, not just the disc, so it reads as a blast and not as the figure
+    // lighting up.
+    if (u.look.z > 0.0) {
+        let fall = exp(-dot(cd, cd) / (u.quality.y * u.quality.y) * 0.6);
+        col = col + BLAST * (u.look.z * (0.3 + 1.5 * fall));
+    }
+    return vec4<f32>(col, 1.0);
 }

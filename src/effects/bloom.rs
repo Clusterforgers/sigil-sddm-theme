@@ -22,6 +22,18 @@ impl Bloom {
         self.levels.fill(1.0);
     }
 
+    /// Hold every layer at least at `level`.
+    pub fn raise_all(&mut self, level: f32) {
+        for b in self.levels.iter_mut() {
+            *b = b.max(level);
+        }
+    }
+
+    /// How many layers it covers.
+    pub fn layers(&self) -> usize {
+        self.levels.len()
+    }
+
     /// Exponential fade, so a bloom decays at the same rate whatever the framerate.
     pub fn fade(&mut self, dt: f32) {
         let k = (-dt / (DECAY / 4.0)).exp();

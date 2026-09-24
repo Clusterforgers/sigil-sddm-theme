@@ -17,13 +17,17 @@
 
   // How often each effect happens on its own, in seconds between one and the next: a
   // single number, or [min, max] for a fresh random wait each time. `enabled: false`
-  // turns one off. Every line is optional; these are the defaults.
+  // turns one off. Every line is optional.
   effects: {
-    drops:      { every: [3.6, 8.8] },   // blood dropping into the middle
     implosions: { every: [3.0, 5.0] },     // a ring closing in from the rim, then a burst of lightning
     lightning:  { every: [0.08, 0.35],   // strikes walking the figure...
                 lulls: { chance: 0.22, last: [0.7, 3.6] } },  // ...with the odd longer pause
     glyphs:     { every: [0.5, 1.1] },   // a cluster of letters lighting up and lifting off
+
+    // Enter: blood drops, the figure spins up and gathers light for `charge` seconds,
+    // explodes, and flies apart over `break`. It stays gone for `hold`, then comes back
+    // over `reform` — or never, with `stay_broken: true` (for the login screen).
+    surge: { charge: 1.0, break: 1.8, hold: 1.2, reform: 1.6, stay_broken: false },
   },
 
   // `turns` are whole revolutions per loop, positive clockwise. Stacking: a higher `z`

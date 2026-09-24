@@ -27,6 +27,9 @@ pub struct GpuLayer {
     /// (nearest ink, furthest ink, unused, unused) from the centre; outside it the layer
     /// is skipped without sampling.
     pub extent: [f32; 4],
+    /// (scale, opacity, unused, unused): how the layer is drawn right now. (1, 1) at rest;
+    /// the surge flings layers outward and fades them.
+    pub form: [f32; 4],
 }
 
 /// One ring of blood, in canvas units.
@@ -89,7 +92,7 @@ pub struct Uniforms {
     pub quality: [f32; 4],
     /// (live pulses, live flares, live limbs, live glyphs)
     pub live: [f32; 4],
-    /// (collapse flash, layer-tint strength, unused, unused)
+    /// (collapse flash, layer-tint strength, explosion flash, unused)
     pub look: [f32; 4],
     /// (min x, min y, max x, max y) around the lit glyphs where they sit in the artwork,
     /// for skipping the pass that hides them.
@@ -121,6 +124,7 @@ pub fn uniforms(fig: &Rendered, ss: u32) -> Uniforms {
     uni.background = [srgb_to_linear(r), srgb_to_linear(g), srgb_to_linear(b), 1.0];
     for (slot, l) in uni.layers.iter_mut().zip(&fig.layers) {
         slot.extent = [l.extent[0], l.extent[1], 0.0, 0.0];
+        slot.form = [1.0, 1.0, 0.0, 0.0];
     }
     uni
 }

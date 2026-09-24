@@ -1,5 +1,6 @@
-use imagespin::figure::Figure;
-use imagespin::gpu::{self, Gpu};
+use imagespin::effects::Effects;
+use imagespin::figure::{Figure, Rendered};
+use imagespin::gpu::{self, Gpu, Uniforms};
 
 use std::time::Instant;
 
@@ -24,6 +25,9 @@ struct Args {
     frames: u32,
     /// Write the rendered frame here, for checking a change did not alter the picture.
     out: Option<String>,
+    /// Instead of the stress scene: press Enter, run the real effects this many seconds,
+    /// and render that moment. For seeing the surge without a window.
+    surge: Option<f32>,
     figure: String,
 }
 
@@ -40,6 +44,7 @@ fn parse_args() -> Args {
         lift: 10.0,
         frames: 120,
         out: None,
+        surge: None,
         figure: "figure.json5".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -63,6 +68,7 @@ fn parse_args() -> Args {
             "--frames" => a.frames = val().parse().unwrap(),
             "--figure" => a.figure = val().clone(),
             "--out" => a.out = Some(val().clone()),
+            "--surge" => a.surge = Some(val().parse().unwrap()),
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -200,6 +206,10 @@ fn main() {
         uni.gbox_p = [pl[0], pl[1], ph[0], ph[1]];
     }
 
+    if let Some(secs) = args.surge {
+        simulate(&fig, &mut uni, secs);
+    }
+
     let gpu = Gpu::new(&device, &queue, FORMAT, &fig, &uni);
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("bench target"),
@@ -298,4 +308,29 @@ fn save(
     }
     img.save(path).unwrap_or_else(|e| panic!("cannot write {path}: {e}"));
     println!("  wrote {path}");
+}
+
+/// Press Enter and run the effects and the rotation for `secs`, exactly as the viewer
+/// does, then leave that moment in `uni`.
+fn simulate(fig: &Rendered, uni: &mut Uniforms, secs: f32) {
+    const DT: f32 = 1.0 / 60.0;
+    let loop_secs = fig.loop_secs.max(1e-3);
+    let speeds: Vec<f32> = fig.layers.iter().map(|l| l.turns as f32 / loop_secs).collect();
+    let mut angles = vec![0.0f32; speeds.len()];
+    let mut fx = Effects::new(fig);
+    fx.surge();
+    for _ in 0..(secs / DT).round() as usize {
+        fx.advance(DT);
+        for (i, (a, &s)) in angles.iter_mut().zip(&speeds).enumerate() {
+            *a -= fx.spin_rate(i, s) * DT * std::f32::consts::TAU;
+        }
+    }
+    for (l, &a) in uni.layers.iter_mut().zip(&angles) {
+        let (s, c) = a.sin_cos();
+        l.motion = [a, 0.0, s, c];
+    }
+    fx.write(uni, &angles);
+    let [jx, jy] = fx.shake();
+    uni.fit[1] += jx * uni.fit[0];
+    uni.fit[2] += jy * uni.fit[0];
 }

@@ -1,4 +1,4 @@
-use imagespin::effects::{Census, Drop, Effects};
+use imagespin::effects::{Census, Effects};
 use imagespin::gpu::{self, Gpu, Uniforms};
 use imagespin::figure::{self, Figure, FigureError, Rendered};
 
@@ -131,14 +131,14 @@ fn help() {
     any key      bloom a random layer
     1-9          bloom that specific layer
     Space        bloom every layer at once
-    Enter        a heavy drop into the middle
+    Enter        the surge: blood drops, the figure spins up, explodes and breaks apart
     t            colour each layer differently, to see which ring is which
     - / =        supersampling down / up (antialiasing vs framerate)
     F1           this help
     Esc          quit
 
-  Blood drops into the middle on its own — and now and then implodes instead — while
-  blue lightning arcs from one part of the formation to the next. Neither needs a key.
+  Now and then a ring of blood closes in from the rim and bursts, while blue lightning
+  arcs from one part of the formation to the next. Neither needs a key.
 "#
     );
 }
@@ -255,19 +255,22 @@ impl App {
         let dt = (now - self.last).as_secs_f32();
         self.last = now;
 
-        // Constant rate, always. Speeds are clockwise; the angle the shader wants runs the
-        // other way.
-        for (a, s) in self.st.angle.iter_mut().zip(&self.st.speed) {
-            *a -= s * dt * std::f32::consts::TAU;
-        }
         self.fx.advance(dt);
+        // Each layer at its own fixed rate, unless the surge has it spinning up. Speeds
+        // are clockwise; the angle the shader wants runs the other way.
+        for (i, (a, &s)) in self.st.angle.iter_mut().zip(&self.st.speed).enumerate() {
+            *a -= self.fx.spin_rate(i, s) * dt * std::f32::consts::TAU;
+        }
 
         // Fit the canvas into the window, preserving aspect.
         let [sw, sh] = self.fig.canvas;
         let (w, h) = (gfx.surf_cfg.width as f32, gfx.surf_cfg.height as f32);
         let scale = (w / sw).min(h / sh);
         let n = self.st.names.len();
-        self.uni.fit = [scale, (w - sw * scale) * 0.5, (h - sh * scale) * 0.5, n as f32];
+        // The surge shakes the whole picture, which is just moving where it is fitted.
+        let [jx, jy] = self.fx.shake();
+        let (ox, oy) = ((w - sw * scale) * 0.5 + jx * scale, (h - sh * scale) * 0.5 + jy * scale);
+        self.uni.fit = [scale, ox, oy, n as f32];
         self.uni.quality[0] = self.st.ss as f32;
         self.uni.quality[3] = source_lod(scale, self.st.ss, self.fig.scale);
         self.uni.look[1] = if self.st.tint { 1.0 } else { 0.0 };
@@ -359,7 +362,7 @@ impl ApplicationHandler for App {
                     Key::Named(NamedKey::F1) => help(),
 
                     // The one key that drives the energy rather than the bloom.
-                    Key::Named(NamedKey::Enter) => self.fx.drop(Drop::Heavy),
+                    Key::Named(NamedKey::Enter) => self.fx.surge(),
 
                     // Before the catch-all below, which blooms on any other character.
                     Key::Character("t") | Key::Character("T") => {

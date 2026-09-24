@@ -2,10 +2,10 @@
 //!
 //! ```json5
 //! effects: {
-//!   drops:      { every: [2.6, 4.8] },   // seconds between, drawn fresh each time
-//!   implosions: { every: 15 },           // a single number means exactly that
+//!   implosions: { every: [12, 22] },     // seconds between, drawn fresh each time
+//!   glyphs:     { every: 2 },            // a single number means exactly that
 //!   lightning:  { every: [0.08, 0.35], lulls: { chance: 0.22, last: [0.7, 1.6] } },
-//!   glyphs:     { enabled: false },
+//!   surge:      { charge: 1.8, break: 1.4, stay_broken: true },
 //! }
 //! ```
 //!
@@ -64,8 +64,6 @@ pub struct Lulls {
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(from = "SettingsIn")]
 pub struct Settings {
-    /// Blood dropping into the middle.
-    pub drops: Schedule,
     /// A ring closing in from the rim, landing, and throwing lightning out.
     pub implosions: Schedule,
     /// Lightning walking the figure.
@@ -73,13 +71,30 @@ pub struct Settings {
     pub lulls: Lulls,
     /// A cluster of letters lighting up and lifting off.
     pub glyphs: Schedule,
+    /// What Enter sets off.
+    pub surge: SurgeTiming,
+}
+
+/// The sequence Enter starts: the figure spins up and gathers light, explodes, and flies
+/// apart. Durations in seconds.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SurgeTiming {
+    /// Spinning up and gathering, from the keypress to the explosion.
+    pub charge: f32,
+    /// The layers flying apart and fading, after the explosion.
+    pub scatter: f32,
+    /// How long it stays broken before coming back together.
+    pub hold: f32,
+    /// Coming back together.
+    pub reform: f32,
+    /// Never come back — for a login screen, where what follows is the session.
+    pub stay_broken: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         let on = |min, max| Schedule { every: Seconds::between(min, max), enabled: true };
         Settings {
-            drops: on(2.6, 4.8),
             implosions: on(12.0, 22.0),
             // Mostly a quick rattle of strikes...
             lightning: on(0.08, 0.35),
@@ -88,6 +103,7 @@ impl Default for Settings {
             // A group is already several glyphs, so leave a gap before the next one. Back to
             // back they overlap into a permanent wash: the pause is what makes each an event.
             glyphs: on(1.2, 2.8),
+            surge: SurgeTiming { charge: 1.8, scatter: 1.4, hold: 1.2, reform: 1.6, stay_broken: false },
         }
     }
 }
@@ -96,7 +112,6 @@ impl Settings {
     /// Reject timings that parse but make no sense, naming the field.
     pub fn check(&self) -> Result<(), String> {
         for (name, s) in [
-            ("drops", self.drops),
             ("implosions", self.implosions),
             ("lightning", self.lightning),
             ("glyphs", self.glyphs),
@@ -106,6 +121,12 @@ impl Settings {
         self.lulls.last.check("lightning.lulls.last")?;
         if !(0.0..=1.0).contains(&self.lulls.chance) {
             return Err(format!("`lightning.lulls.chance` must be between 0 and 1, got {}", self.lulls.chance));
+        }
+        let g = self.surge;
+        for (name, secs) in [("charge", g.charge), ("break", g.scatter), ("hold", g.hold), ("reform", g.reform)] {
+            if secs < 0.05 {
+                return Err(format!("`surge.{name}` must be at least 0.05 seconds, got {secs}"));
+            }
         }
         Ok(())
     }
@@ -117,10 +138,21 @@ impl Settings {
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct SettingsIn {
-    drops: ScheduleIn,
     implosions: ScheduleIn,
     lightning: LightningIn,
     glyphs: ScheduleIn,
+    surge: SurgeIn,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct SurgeIn {
+    charge: Option<f32>,
+    #[serde(rename = "break")]
+    scatter: Option<f32>,
+    hold: Option<f32>,
+    reform: Option<f32>,
+    stay_broken: Option<bool>,
 }
 
 #[derive(Default, Deserialize)]
@@ -156,7 +188,6 @@ impl From<SettingsIn> for Settings {
         let d = Settings::default();
         let lightning = ScheduleIn { every: s.lightning.every, enabled: s.lightning.enabled };
         Settings {
-            drops: s.drops.over(d.drops),
             implosions: s.implosions.over(d.implosions),
             lightning: lightning.over(d.lightning),
             lulls: Lulls {
@@ -164,6 +195,13 @@ impl From<SettingsIn> for Settings {
                 last: s.lightning.lulls.last.unwrap_or(d.lulls.last),
             },
             glyphs: s.glyphs.over(d.glyphs),
+            surge: SurgeTiming {
+                charge: s.surge.charge.unwrap_or(d.surge.charge),
+                scatter: s.surge.scatter.unwrap_or(d.surge.scatter),
+                hold: s.surge.hold.unwrap_or(d.surge.hold),
+                reform: s.surge.reform.unwrap_or(d.surge.reform),
+                stay_broken: s.surge.stay_broken.unwrap_or(d.surge.stay_broken),
+            },
         }
     }
 }
@@ -210,9 +248,12 @@ mod tests {
     #[test]
     fn anything_left_out_keeps_its_default() {
         assert_eq!(parse("{}"), Settings::default());
-        let s = parse("{ drops: { every: 3 }, lightning: { lulls: { chance: 0 } }, glyphs: { enabled: false } }");
-        assert_eq!(s.drops.every, Seconds::between(3.0, 3.0));
-        assert!(s.drops.enabled);
+        let s = parse("{ implosions: { every: 3 }, lightning: { lulls: { chance: 0 } }, glyphs: { enabled: false }, surge: { break: 2, stay_broken: true } }");
+        assert_eq!(s.implosions.every, Seconds::between(3.0, 3.0));
+        assert!(s.implosions.enabled);
+        assert_eq!(s.surge.scatter, 2.0);
+        assert!(s.surge.stay_broken);
+        assert_eq!(s.surge.charge, Settings::default().surge.charge);
         assert_eq!(s.lulls.chance, 0.0);
         assert_eq!(s.lulls.last, Settings::default().lulls.last);
         assert!(!s.glyphs.enabled);
@@ -221,10 +262,13 @@ mod tests {
 
     #[test]
     fn nonsense_is_rejected_by_name() {
-        let e = parse("{ drops: { every: [5, 2] } }").check().unwrap_err();
-        assert!(e.contains("drops.every"), "{e}");
+        let e = parse("{ implosions: { every: [5, 2] } }").check().unwrap_err();
+        assert!(e.contains("implosions.every"), "{e}");
+        let e = parse("{ surge: { charge: 0 } }").check().unwrap_err();
+        assert!(e.contains("surge.charge"), "{e}");
         let e = parse("{ lightning: { every: 0 } }").check().unwrap_err();
         assert!(e.contains("lightning.every"), "{e}");
-        assert!(json5::from_str::<Settings>("{ drops: { evry: 3 } }").is_err());
+        assert!(json5::from_str::<Settings>("{ glyphs: { evry: 3 } }").is_err());
+        assert!(json5::from_str::<Settings>("{ drops: { every: 3 } }").is_err(), "drops are Enter's now");
     }
 }

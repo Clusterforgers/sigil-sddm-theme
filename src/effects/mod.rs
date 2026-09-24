@@ -5,11 +5,12 @@ mod glyph;
 mod pool;
 mod pulse;
 mod settings;
+mod surge;
 
 pub use bloom::Bloom;
 pub use pool::{Cadence, Effect, Pool};
 pub use pulse::Drop;
-pub use settings::{Lulls, Schedule, Seconds, Settings};
+pub use settings::{Lulls, Schedule, Seconds, Settings, SurgeTiming};
 
 use crate::gpu::{Uniforms, MAX_BOLT_SEGS, MAX_FLARES, MAX_GLYPHS, MAX_PULSES};
 use crate::figure::{Glyph, Rendered};
@@ -17,6 +18,7 @@ use bolt::{Bolt, Burst, Sky, MAX_BOLTS};
 use flare::Flare;
 use glyph::Lit;
 use pulse::Pulse;
+use surge::Surge;
 
 use rand::rngs::SmallRng;
 use rand::RngExt;
@@ -54,10 +56,12 @@ pub struct Effects {
     /// Where the last bolt landed. The next one leaves from here, so the lightning walks
     /// the diagram instead of teleporting around it.
     spark_at: [f32; 2],
+    /// What Enter sets off, and this frame's screen shake from it, in canvas units.
+    surge: Surge,
+    shake: [f32; 2],
 
     /// How often each ambient effect happens, from the figure file.
     settings: Settings,
-    next_drop: Cadence,
     next_implosion: Cadence,
     next_bolt: Cadence,
     next_lit: Cadence,
@@ -79,8 +83,9 @@ impl Effects {
             collapse: 0.0,
             // The first bolt has nowhere to come from, so start it at the centre.
             spark_at: fig.center,
+            surge: Surge::new(),
+            shake: [0.0; 2],
             settings: fig.effects,
-            next_drop: Cadence::after(0.0),
             next_implosion: Cadence::after(0.0),
             next_bolt: Cadence::after(0.0),
             next_lit: Cadence::after(0.0),
@@ -105,7 +110,6 @@ impl Effects {
     /// appears; let it turn for a moment first.
     fn rewind(&mut self) {
         let s = &self.settings;
-        self.next_drop.wait(s.drops.every.draw(&mut self.rng));
         self.next_implosion.wait(s.implosions.every.draw(&mut self.rng));
         self.next_bolt.wait(s.lightning.every.draw(&mut self.rng));
         self.next_lit.wait(s.glyphs.every.draw(&mut self.rng));
@@ -114,6 +118,28 @@ impl Effects {
     /// Start a disturbance.
     pub fn drop(&mut self, kind: Drop) {
         self.pulses.push(Pulse::new(kind, self.sky.disc));
+    }
+
+    /// Set off the surge: a blood drop lands, the figure spins up and gathers light, and
+    /// explodes. Does nothing while one is already running.
+    pub fn surge(&mut self) {
+        if self.surge.start(&mut self.rng, self.bloom.layers()) {
+            self.drop(Drop::Heavy);
+        }
+    }
+
+    /// How fast layer `i` turns right now, in revolutions per second, given its own
+    /// `speed`. Normally just `speed`; during the surge much faster, and in the layer's
+    /// own direction — a layer that normally stands still picks one by its position.
+    pub fn spin_rate(&self, i: usize, speed: f32) -> f32 {
+        let (mult, extra) = self.surge.spin(&self.settings.surge);
+        let way = if speed != 0.0 { speed.signum() } else if i.is_multiple_of(2) { 1.0 } else { -1.0 };
+        speed * (1.0 + mult) + way * extra
+    }
+
+    /// How far to nudge the whole picture this frame, in canvas units.
+    pub fn shake(&self) -> [f32; 2] {
+        self.shake
     }
 
     /// A flare where a bolt came down.
@@ -128,8 +154,21 @@ impl Effects {
         self.flares.push(f);
     }
 
+    /// Energy released at the centre: a ring of blood thrown out, a fan of lightning, and
+    /// the whole formation lighting up. What an implosion does when it lands, and what the
+    /// surge ends in.
+    fn detonate(&mut self, power: f32) {
+        self.drop(Drop::Rebound(power));
+        // The fan is queued rather than fired here so it comes out as a rush over the
+        // next fifth of a second.
+        self.burst.start(&mut self.rng, power.clamp(0.5, 1.5));
+        self.collapse = self.collapse.max(1.0);
+        let strength = self.burst.power * 1.2;
+        self.flares.push(Flare { pos: self.sky.center, radius: self.sky.disc * 0.3, age: 0.0, life: 0.5, strength });
+    }
+
     /// Advance everything by `dt`, drop whatever has finished, follow up on what it left
-    /// behind, and spawn whatever is due. None of this is driven by the keyboard.
+    /// behind, and spawn whatever is due.
     pub fn advance(&mut self, dt: f32) {
         self.bloom.fade(dt);
         self.collapse *= (-6.0 * dt).exp();
@@ -140,22 +179,10 @@ impl Effects {
         // An implosion that reaches the middle lands, and throws back out everything it
         // gathered on the way in.
         for p in self.pulses.advance(dt).into_iter().filter(Pulse::landed) {
-            let gathered = p.gathered();
-            self.drop(Drop::Rebound(gathered));
-            // It throws off energy as well as blood. The fan is queued rather than fired
-            // here so it comes out as a rush over the next fifth of a second.
-            self.burst.start(&mut self.rng, gathered.clamp(0.5, 1.5));
-            // ...and the whole formation answers.
-            self.collapse = 1.0;
-            let power = self.burst.power;
-            self.flares.push(Flare {
-                pos: self.sky.center,
-                radius: self.sky.disc * 0.3,
-                age: 0.0,
-                life: 0.5,
-                strength: power * 1.2,
-            });
+            self.detonate(p.gathered());
         }
+
+        self.advance_surge(dt);
 
         self.burst.tick(dt);
         while let Some(angle) = self.burst.next_arm(&mut self.rng) {
@@ -164,39 +191,58 @@ impl Effects {
             self.flare(to, 40.0..80.0, 0.3..0.6, self.burst.power);
         }
 
-        // Each ambient effect on its own schedule. A disabled one keeps its clock running
-        // but does nothing, so re-enabling it in the file picks up straight away.
-        let s = self.settings;
+        self.advance_ambient(dt);
+    }
 
-        if self.next_drop.tick(dt) {
-            if s.drops.enabled {
-                self.drop(Drop::Droplet);
-            }
-            self.next_drop.wait(s.drops.every.draw(&mut self.rng));
+    fn advance_surge(&mut self, dt: f32) {
+        let timing = self.settings.surge;
+        if self.surge.advance(dt, &timing) {
+            // Bigger than any implosion, and the letters in flight go with the formation.
+            self.detonate(1.5);
+            self.collapse = 1.6;
+            self.lit = Pool::new(MAX_GLYPHS);
         }
+        // Every layer gathers light as the charge builds, all the way to full.
+        self.bloom.raise_all(self.surge.charge(&timing));
+        let amount = self.surge.shake(&timing);
+        self.shake = if amount > 0.0 {
+            [self.rng.random_range(-amount..amount), self.rng.random_range(-amount..amount)]
+        } else {
+            [0.0; 2]
+        };
+    }
+
+    /// Each ambient effect on its own schedule. A disabled one keeps its clock running but
+    /// does nothing, so re-enabling it in the file picks up straight away. While the surge
+    /// runs they hold off — all but the lightning, which the charge whips up instead.
+    fn advance_ambient(&mut self, dt: f32) {
+        let s = self.settings;
+        let charge = self.surge.charge(&s.surge);
+        let calm = !self.surge.busy();
 
         if self.next_implosion.tick(dt) {
-            if s.implosions.enabled {
+            if s.implosions.enabled && calm {
                 self.drop(Drop::Implosion);
             }
             self.next_implosion.wait(s.implosions.every.draw(&mut self.rng));
         }
 
         if self.next_bolt.tick(dt) {
-            if s.lightning.enabled {
+            if s.lightning.enabled && (calm || charge > 0.0) {
                 let (bolt, to) = self.sky.strike(&mut self.rng, self.spark_at);
                 self.bolts.push(bolt);
                 // Something has to light up where it landed, or the strike has no consequence.
                 self.flare(to, 40.0..85.0, 0.35..0.70, 1.0);
                 self.spark_at = to;
             }
-            let lull = self.rng.random_range(0.0..1.0) < s.lulls.chance;
+            let lull = charge == 0.0 && self.rng.random_range(0.0..1.0) < s.lulls.chance;
             let wait = if lull { s.lulls.last } else { s.lightning.every };
-            self.next_bolt.wait(wait.draw(&mut self.rng));
+            // Up to eight times as often at the height of the charge.
+            self.next_bolt.wait(wait.draw(&mut self.rng) / (1.0 + 7.0 * charge));
         }
 
         if self.next_lit.tick(dt) {
-            if s.glyphs.enabled {
+            if s.glyphs.enabled && calm {
                 for l in glyph::cluster(&mut self.rng, &self.catalogue, MAX_GLYPHS) {
                     self.lit.push(l);
                 }
@@ -208,9 +254,16 @@ impl Effects {
     /// Write every effect into the uniform block. `angles` is each layer's current turn,
     /// in the same order as the layers `Effects` was built with.
     pub fn write(&self, uni: &mut Uniforms, angles: &[f32]) {
+        let timing = &self.settings.surge;
         for (i, l) in uni.layers.iter_mut().enumerate().take(angles.len()) {
             l.motion[1] = self.bloom.level(i);
+            let (scale, opacity) = self.surge.form(i, timing);
+            l.form = [scale, opacity, 0.0, 0.0];
         }
+        // A layer flying apart is drawn larger than the disc, and the shader has to look
+        // that far out for it.
+        uni.quality[1] = self.sky.disc * self.surge.reach(timing);
+        uni.look[2] = self.surge.blast(timing);
 
         for (slot, p) in uni.pulses.iter_mut().zip(self.pulses.iter()) {
             *slot = p.gpu();
@@ -307,38 +360,67 @@ mod tests {
         let mut r = fig.render(0.25);
         r.effects = settings;
         let mut fx = Effects::new(&r);
-        let (mut drops, mut bolts, mut glyphs) = (0, 0, 0);
+        let (mut rings, mut bolts, mut glyphs) = (0, 0, 0);
         let (mut p, mut b, mut g) = (0, 0, 0);
         for _ in 0..(secs * 60.0) as usize {
             fx.advance(1.0 / 60.0);
             let c = fx.census();
             // Count arrivals: a pool that grew started something.
-            drops += c.pulses.saturating_sub(p);
+            rings += c.pulses.saturating_sub(p);
             bolts += fx.bolts.len().saturating_sub(b);
             glyphs += c.glyphs.saturating_sub(g);
             (p, b, g) = (c.pulses, fx.bolts.len(), c.glyphs);
         }
-        (drops, bolts, glyphs)
+        (rings, bolts, glyphs)
     }
 
     /// The figure file's timings are what actually drive the effects.
     #[test]
     fn settings_decide_what_happens_and_how_often() {
         let mut off = Settings::default();
-        for s in [&mut off.drops, &mut off.implosions, &mut off.lightning, &mut off.glyphs] {
+        for s in [&mut off.implosions, &mut off.lightning, &mut off.glyphs] {
             s.enabled = false;
         }
         assert_eq!(started(off, 30.0), (0, 0, 0), "disabled effects still happened");
 
         let mut slow = Settings::default();
-        slow.drops.every = Seconds { min: 5.0, max: 5.0 };
-        slow.implosions.enabled = false;
+        slow.implosions.every = Seconds { min: 5.0, max: 5.0 };
         let mut fast = slow;
-        fast.drops.every = Seconds { min: 1.0, max: 1.0 };
-        // Ten seconds: short of a ring's twelve-second life and of the pool's sixteen slots,
-        // so every drop shows up as the pool growing.
+        fast.implosions.every = Seconds { min: 2.0, max: 2.0 };
+        // Ten seconds, short of a ring's twelve-second life, and few enough that the rings
+        // and the rebounds they turn into fit the pool: every implosion shows up as the
+        // pool growing. (A landing swaps its ring for a rebound, which nets to nothing.)
         let (s, f) = (started(slow, 10.0).0, started(fast, 10.0).0);
-        assert!((1..=2).contains(&s) && (9..=10).contains(&f), "slow {s}, fast {f}");
+        assert!((1..=2).contains(&s) && (4..=5).contains(&f), "slow {s}, fast {f}");
+    }
+
+    /// Enter: a drop, a spin-up that only grows, one explosion, and the layers flung out.
+    #[test]
+    fn the_surge_spins_up_explodes_and_breaks_the_formation() {
+        let (mut fx, angles) = effects();
+        let t = fx.settings.surge;
+        fx.surge();
+        assert_eq!(fx.pulses.len(), 1, "Enter drops blood");
+        let mut last = fx.spin_rate(0, 0.1);
+        let mut uni: Uniforms = bytemuck::Zeroable::zeroed();
+        for _ in 0..((t.charge - 0.1) * 60.0) as usize {
+            fx.advance(1.0 / 60.0);
+            let now = fx.spin_rate(0, 0.1);
+            assert!(now >= last, "the spin-up faltered");
+            last = now;
+        }
+        assert!(last > 0.1 * 5.0, "barely spun up: {last}");
+        assert!(fx.collapse < 1.5, "exploded early");
+        for _ in 0..12 {
+            fx.advance(1.0 / 60.0);
+        }
+        assert!(fx.collapse > 1.0, "no explosion");
+        for _ in 0..30 {
+            fx.advance(1.0 / 60.0);
+        }
+        fx.write(&mut uni, &angles);
+        assert!(uni.layers.iter().take(angles.len()).all(|l| l.form[0] > 1.0), "a layer stayed put");
+        assert!(uni.quality[1] > fx.sky.disc, "the shader would clip the flying layers");
     }
 
     /// An implosion runs all the way in, lands, and throws its rebound and fan out.
