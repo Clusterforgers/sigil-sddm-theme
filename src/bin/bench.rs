@@ -1,14 +1,3 @@
-//! Offscreen benchmark for the viewer's fragment shader.
-//!
-//! The viewer is vsync-locked and its window size is whatever the compositor gives it,
-//! so neither its framerate nor its resolution is a usable measurement. This renders the
-//! same pipeline into a texture at a fixed size, with no presentation and no compositor
-//! involved, and reports milliseconds per frame.
-//!
-//! ```text
-//! cargo run --release --bin bench -- --size 2880x1746 --ss 2 --bloom 1
-//! ```
-
 use imagespin::config;
 use imagespin::gpu::{self, Gpu};
 

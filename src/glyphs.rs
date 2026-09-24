@@ -1,17 +1,3 @@
-//! Finds the individual letters and symbols in the artwork.
-//!
-//! The viewer wants to light one up and float it off the plate, which means knowing where
-//! each one *is*. Nothing in the pipeline knew that — the source is a picture, and the
-//! shader only ever asks it for the colour at a point. So this walks the image once at
-//! startup and picks out the blobs of gold small enough to be a glyph rather than part of
-//! the ring-and-polygon line work.
-//!
-//! The artwork makes this easy: about 88% of it is flat ground at luma 13 and the ink is
-//! roughly 4% of the pixels, so a threshold separates them cleanly. What it cannot do is
-//! separate a letter that happens to touch a cell divider — those merge into the line
-//! network and are dropped by the size filter, which is the right failure: a glyph that
-//! floats off with a piece of ruling attached would look like a mistake.
-
 use image::RgbImage;
 
 /// One letter or symbol, in source pixels.
@@ -114,4 +100,78 @@ pub fn find(src: &RgbImage, center: [f32; 2], disc: f32) -> Vec<Glyph> {
         }
     }
     out
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Scratch: every ink blob in the source, as polar coordinates, sorted by radius.
+    ///
+    /// The plate's ruling is one connected network, so anything touching it is swallowed
+    /// by the size filter. Painting the drawing's own lines out of the scan first — they
+    /// sit on the scan's to within a pixel — leaves the crosses standing alone.
+    #[test]
+    #[ignore]
+    fn dump_blobs() {
+        let cfg: crate::config::Config =
+            serde_json::from_str(include_str!("../layers.json")).unwrap();
+        let mut src = image::open("images/1.png").unwrap().to_rgb8();
+        let c = cfg.center;
+
+        // Lines only: same figure, every list of lettering and crosses emptied.
+        let bare = crate::sigil::Figure {
+            cell_text: vec![],
+            letter_text: vec![],
+            names: (vec![], 0.0, 0.0, 0.0),
+            lens_crosses: (vec![], 0.0, 0.0),
+            spirit_rows: vec![],
+            spirit_names: vec![],
+            crosses: vec![],
+            hairline: 6.0,
+            ..crate::sigil::Figure::default()
+        };
+        let lines = crate::sigil::draw(&cfg, &bare, 1.0);
+        for (x, y, p) in src.enumerate_pixels_mut() {
+            let l = lines.get_pixel(x, y).0;
+            if l[0] as u32 + l[1] as u32 + l[2] as u32 > 200 {
+                *p = image::Rgb([0, 0, 0]);
+            }
+        }
+
+        let mut g = find(&src, c, 410.0);
+        g.sort_by(|a, b| {
+            let ra = (a.pos[0] - c[0]).hypot(a.pos[1] - c[1]);
+            let rb = (b.pos[0] - c[0]).hypot(b.pos[1] - c[1]);
+            ra.partial_cmp(&rb).unwrap()
+        });
+        // ...and what the drawing has so far, so a blob can say whether it is still missing.
+        let drawn = crate::sigil::draw(&cfg, &crate::sigil::Figure::default(), 1.0);
+        let lit = |img: &image::RgbImage, x: f32, y: f32, rad: f32| -> bool {
+            let k = rad.ceil() as i32;
+            let (w, h) = (img.width() as i32, img.height() as i32);
+            for dy in -k..=k {
+                for dx in -k..=k {
+                    let (px, py) = (x as i32 + dx, y as i32 + dy);
+                    if px < 0 || py < 0 || px >= w || py >= h {
+                        continue;
+                    }
+                    let p = img.get_pixel(px as u32, py as u32).0;
+                    if p[0] as u32 + p[1] as u32 + p[2] as u32 > 200 {
+                        return true;
+                    }
+                }
+            }
+            false
+        };
+
+        println!("# {} blobs", g.len());
+        for b in &g {
+            let (dx, dy) = (b.pos[0] - c[0], b.pos[1] - c[1]);
+            let r = dx.hypot(dy);
+            let a = (-dx).atan2(-dy).to_degrees();
+            let a = if a < 0.0 { a + 360.0 } else { a };
+            let have = lit(&drawn, b.pos[0], b.pos[1], b.radius * 0.7);
+            println!("{r:7.2} {a:7.2} {:5.1} {}", b.radius, if have { "have" } else { "MISSING" });
+        }
+    }
 }

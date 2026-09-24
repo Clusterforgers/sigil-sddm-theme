@@ -1,9 +1,3 @@
-//! Layer regions.
-//!
-//! Angles (`alpha`) are radians measured from North (12 o'clock), increasing
-//! counter-clockwise on screen. The corresponding image-space offset is
-//! `dx = -r * sin(alpha)`, `dy = -r * cos(alpha)` (y grows downward).
-
 use serde::Deserialize;
 use std::f32::consts::{PI, TAU};
 

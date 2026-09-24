@@ -1,16 +1,3 @@
-// Real-time version of src/render.rs.
-//
-// Same idea: rotation preserves radius, so one pass over the output pixels handles every
-// layer. For each pixel we un-rotate by each layer's angle and take the first layer whose
-// region contains the result. Keep `boundary_radius` in step with geom.rs.
-//
-// Two things keep the per-pixel cost down, both set up on the CPU in src/gpu.rs:
-//
-//   * every boundary carries the min/max radius it reaches over all angles, so a pixel's
-//     radius usually settles containment with two compares instead of trigonometry;
-//   * the bloom reads a pre-blurred highlight pyramid rather than gathering the source
-//     with two rings of taps.
-
 const PI: f32 = 3.14159265359;
 const TAU: f32 = 6.28318530718;
 const MAX_LAYERS: u32 = 16u;
@@ -39,7 +26,7 @@ struct Uniforms {
     params: vec4<f32>,
     // live pulses, live flares, live bolt segments, collapse flash
     counts: vec4<f32>,
-    // (mip level to read the artwork at, unused, unused, unused)
+    // (mip level to read the artwork at, layer-tint strength, unused, unused)
     misc: vec4<f32>,
     // (min x, min y, max x, max y) around the lit glyphs in the artwork
     gbox: vec4<f32>,
@@ -76,6 +63,20 @@ fn rem_euclid(x: f32, y: f32) -> f32 {
 }
 
 // Distance from the centre to a boundary along `alpha` (radians, from North, CCW).
+// One distinct colour per layer, outward-in, matching `LAYER_TINT` in `render.rs` and the
+// viewer's 1-7 keys.
+fn layer_tint(k: u32) -> vec3<f32> {
+    switch (k) {
+        case 0u: { return vec3<f32>(1.00, 0.28, 0.28); }
+        case 1u: { return vec3<f32>(1.00, 0.62, 0.16); }
+        case 2u: { return vec3<f32>(0.95, 0.95, 0.22); }
+        case 3u: { return vec3<f32>(0.32, 0.95, 0.38); }
+        case 4u: { return vec3<f32>(0.26, 0.90, 0.96); }
+        case 5u: { return vec3<f32>(0.48, 0.58, 1.00); }
+        default: { return vec3<f32>(0.96, 0.42, 0.96); }
+    }
+}
+
 fn boundary_radius(b: vec4<f32>, extra: vec4<f32>, alpha: f32) -> f32 {
     if (b.x < 0.5) {
         return b.y;                       // circle: radius in .y
@@ -458,6 +459,13 @@ fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
             // A glyph that has lifted off leaves its slot empty; the copy is drawn
             // somewhere else entirely, at the end, in a frame this loop cannot clip.
             col = col * (1.0 - hide);
+
+            // Which layer this pixel belongs to, said in colour. Only the hue is replaced,
+            // and it goes before the effects so they keep their own colours on top.
+            if (u.misc.y > 0.0) {
+                let lum = dot(col, vec3<f32>(0.299, 0.587, 0.114));
+                col = mix(col, layer_tint(k) * lum * 1.35, u.misc.y);
+            }
 
             // The dip ahead of the crest. A ring needs a hard outer boundary to read as
             // one, and darkening is the only way to draw an edge on artwork this sparse.

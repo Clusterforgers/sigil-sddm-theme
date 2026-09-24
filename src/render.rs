@@ -1,13 +1,19 @@
-//! Inverse-map frame renderer.
-//!
-//! Rotation preserves radius, so every layer is handled in one pass over the output
-//! pixels: for each pixel we un-rotate by each layer's angle in turn and take the first
-//! layer whose region contains the result. No per-layer buffers, no compositing, no holes.
-
 use crate::geom::Layer;
 use image::RgbImage;
 use rayon::prelude::*;
 use std::f32::consts::TAU;
+
+/// One distinct colour per layer, outermost first, for telling which ring turns with
+/// which. `layer_tint` in `spin.wgsl` is a hand-kept copy; change one and change the other.
+pub const LAYER_TINT: [[f32; 3]; 7] = [
+    [1.00, 0.28, 0.28], // red
+    [1.00, 0.62, 0.16], // orange
+    [0.95, 0.95, 0.22], // yellow
+    [0.32, 0.95, 0.38], // green
+    [0.26, 0.90, 0.96], // cyan
+    [0.48, 0.58, 1.00], // blue
+    [0.96, 0.42, 0.96], // magenta
+];
 
 pub struct Renderer {
     pub src: RgbImage,
@@ -19,6 +25,8 @@ pub struct Renderer {
     /// Sorted outermost-first.
     pub layers: Vec<Layer>,
     pub ss: u32,
+    /// Paint each layer in its own colour instead of the artwork's.
+    pub tint: bool,
 }
 
 impl Renderer {
@@ -38,7 +46,7 @@ impl Renderer {
                 .unwrap()
         });
         let scale = out_w as f32 / src.width() as f32;
-        Self { src, center, out_w, out_h, scale, background, layers, ss }
+        Self { src, center, out_w, out_h, scale, background, layers, ss, tint: false }
     }
 
     /// Bilinear sample of the source, or `None` outside its bounds.
@@ -75,12 +83,22 @@ impl Renderer {
         // alpha measured from North, CCW: dx = -r sin a, dy = -r cos a
         let alpha = (-dx).atan2(-dy);
 
-        for (layer, &theta) in self.layers.iter().zip(thetas) {
+        for (i, (layer, &theta)) in self.layers.iter().zip(thetas).enumerate() {
             let a = alpha - theta;
             if layer.contains(r, a) {
                 let (px, py) = (cx - r * a.sin(), cy - r * a.cos());
                 if let Some(c) = self.sample(px, py) {
-                    return c;
+                    if !self.tint {
+                        return c;
+                    }
+                    // Only the hue is replaced, so the lettering stays legible.
+                    let lum = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+                    let t = LAYER_TINT[i.min(LAYER_TINT.len() - 1)];
+                    return [
+                        (t[0] * lum * 1.35).min(255.0),
+                        (t[1] * lum * 1.35).min(255.0),
+                        (t[2] * lum * 1.35).min(255.0),
+                    ];
                 }
                 break;
             }

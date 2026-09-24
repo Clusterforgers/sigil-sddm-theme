@@ -1,9 +1,3 @@
-//! GIF output with a single global palette.
-//!
-//! Rotation only resamples colours that already exist in the source, so one palette
-//! built from the source serves every frame. That avoids the frame-to-frame flicker
-//! you get from per-frame quantisation, and shrinks the file.
-
 use color_quant::NeuQuant;
 use gif::{Encoder, Frame, Repeat};
 use std::fs::File;

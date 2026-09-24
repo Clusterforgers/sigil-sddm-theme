@@ -1,5 +1,3 @@
-//! The shared `layers.json` format.
-
 use crate::geom::Layer;
 use image::RgbImage;
 use serde::Deserialize;

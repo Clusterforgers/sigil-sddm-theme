@@ -90,6 +90,9 @@ enum Cmd {
         /// Render one extra frame (== frame 0) to verify the loop is seamless.
         #[arg(long)]
         loop_check: bool,
+        /// Paint each layer in its own colour, for telling which ring turns with which.
+        #[arg(long)]
+        tint: bool,
     },
 }
 
@@ -207,14 +210,19 @@ fn main() {
             img.save(&out).unwrap_or_else(|e| panic!("cannot write {out}: {e}"));
             println!("wrote {out}  ({}x{})", img.width(), img.height());
         }
-        Cmd::Render { out, frames, colors, ss, png_frames, tol, loop_check } => {
+        Cmd::Render { out, frames, colors, ss, png_frames, tol, loop_check, tint } => {
             let n = frames.unwrap_or(cfg.frames);
             let ncol = colors.unwrap_or(cfg.colors);
             let bg = parse_hex(&cfg.background);
             let (ow, oh) = (cfg.out_size[0], cfg.out_size[1]);
 
-            let r = Renderer::new(
-                src.clone(),
+            // The same canvas the viewer turns. The cuts belong to the drawing now, so the
+            // bare scan run through them would shear. At the scan's own size: `Renderer`
+            // takes its radii in scan pixels and derives its scale from the image width.
+            let canvas = sigil::over(&cfg, &sigil::Figure::default(), &src, 1.0);
+
+            let mut r = Renderer::new(
+                canvas,
                 (cfg.center[0], cfg.center[1]),
                 ow,
                 oh,
@@ -222,6 +230,21 @@ fn main() {
                 cfg.layers.clone(),
                 ss,
             );
+            r.tint = tint;
+            if tint {
+                println!("  layer colours, outermost first:");
+                const NAMES: [&str; 7] =
+                    ["red", "orange", "yellow", "green", "cyan", "blue", "magenta"];
+                for (i, l) in r.layers.iter().enumerate() {
+                    println!(
+                        "    {}  {:<9}  {:<18}  turns {}",
+                        i + 1,
+                        NAMES[i.min(NAMES.len() - 1)],
+                        l.name,
+                        l.turns
+                    );
+                }
+            }
 
             println!("building {ncol}-colour global palette...");
             let pal = gifout::Palette::build(src.as_raw(), ncol, bg);

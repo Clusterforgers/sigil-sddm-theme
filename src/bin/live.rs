@@ -1,12 +1,3 @@
-//! Real-time viewer: the sigil turns at a fixed rate; keys bloom parts of it.
-//!
-//! Renders with the same inverse map as the offline path, but in a fragment shader
-//! (`shaders/spin.wgsl`), so the whole disc redraws every frame at display rate. The
-//! pipeline and uniform layout live in `imagespin::gpu`, shared with `bench`.
-//!
-//! Layer speeds are fixed, taken from layers.json so the window matches what the GIF
-//! renders. Keys do not steer the motion; they bloom a layer, which fades on its own.
-
 use imagespin::config;
 use imagespin::sigil;
 use imagespin::geom::Layer;
@@ -211,6 +202,8 @@ struct State {
     names: Vec<String>,
     /// Supersampling factor, 1-4.
     ss: u32,
+    /// Paint each layer in its own colour, for telling which ring turns with which.
+    tint: bool,
     /// Picks the layer an unassigned key blooms, and everything the energy does.
     rng: SmallRng,
     /// Rings travelling out from the centre, oldest first.
@@ -245,6 +238,30 @@ struct State {
 }
 
 impl State {
+    /// The colours `t` paints the layers in, in the same order as `describe`. Matches
+    /// `LAYER_TINT` in `render.rs` and `layer_tint` in `spin.wgsl`, all three by hand.
+    fn legend(&self) {
+        const NAMES: [&str; 7] =
+            ["red", "orange", "yellow", "green", "cyan", "blue", "magenta"];
+        println!("\n  layer colours on — each ring is painted by the layer that turns it");
+        for (i, name) in self.names.iter().enumerate() {
+            let s = self.speed[i];
+            let way = if s.abs() < 1e-4 {
+                "static".to_string()
+            } else {
+                format!("{:.1}s/rev {}", 1.0 / s.abs(), if s > 0.0 { "CCW" } else { "CW" })
+            };
+            println!(
+                "    {}  {:<9}  {:<18}  {}",
+                i + 1,
+                NAMES[i.min(NAMES.len() - 1)],
+                name,
+                way
+            );
+        }
+        println!("  edit `turns` in layers.json and restart to change any of them\n");
+    }
+
     fn describe(&self) {
         println!("\n  layers (speeds are fixed; edit layers.json to change them)");
         for (i, name) in self.names.iter().enumerate() {
@@ -252,7 +269,10 @@ impl State {
             let period = if s.abs() < 1e-4 {
                 "static".to_string()
             } else {
-                format!("{:.1}s/rev {}", 1.0 / s.abs(), if s > 0.0 { "CW" } else { "CCW" })
+                // Positive is counter-clockwise: both renderers sample at `alpha - theta`,
+                // and `alpha` is measured counter-clockwise from North.
+                let way = if s > 0.0 { "CCW" } else { "CW" };
+                format!("{:.1}s/rev {way}", 1.0 / s.abs())
             };
             println!("    {}  {:<18}  {:>6.3} rev/s   {}", i + 1, name, s, period);
         }
@@ -335,10 +355,6 @@ impl State {
     }
 
     /// A jagged path from `a` to `b`.
-    ///
-    /// The kinks are largest in the middle and pinched to nothing at both ends, so the
-    /// bolt actually meets the two points it is supposed to connect instead of fraying
-    /// past them.
     fn jag(&mut self, a: [f32; 2], b: [f32; 2], steps: usize, spread: f32) -> Vec<Limb> {
         let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
         let len = (dx * dx + dy * dy).sqrt().max(1.0);
@@ -356,11 +372,6 @@ impl State {
     }
 
     /// Strike from wherever the last bolt landed to somewhere new.
-    ///
-    /// Chaining is what makes it read as power moving through the formation rather than
-    /// as unrelated flashes. Most jumps are short, so the lightning works a region over;
-    /// about one in six is a long throw right across the disc, and being rare is what
-    /// makes those land.
     fn add_bolt(&mut self) {
         if self.bolts.len() >= MAX_BOLTS {
             self.bolts.remove(0);
@@ -425,10 +436,6 @@ impl State {
 
 
     /// One arm of the fan an implosion throws out when it lands.
-    ///
-    /// Unlike a wandering strike this has a fixed origin and a given direction, and it
-    /// deliberately leaves `spark_at` alone — the ordinary lightning must not be dragged
-    /// to the centre just because the disc collapsed.
     fn add_burst_bolt(&mut self, angle: f32, power: f32) {
         if self.bolts.len() >= MAX_BOLTS {
             self.bolts.remove(0);
@@ -693,6 +700,7 @@ fn help() {
     1-9          bloom that specific layer
     Space        bloom every layer at once
     Enter        a heavy drop into the middle
+    t            colour each layer differently, to see which ring is which
     - / =        supersampling down / up (antialiasing vs framerate)
     F1           this help
     Esc          quit
@@ -817,6 +825,7 @@ impl App {
         self.uni.fit = [scale, (w - sw * scale) * 0.5, (h - sh * scale) * 0.5, n as f32];
         self.uni.params[0] = self.st.ss as f32;
         self.uni.misc[0] = source_lod(scale, self.st.ss, self.canvas_scale);
+        self.uni.misc[1] = if self.st.tint { 1.0 } else { 0.0 };
         for i in 0..n {
             let a = self.st.angle[i];
             // The shader rotates by this angle rather than un-rotating an arctangent,
@@ -984,6 +993,16 @@ impl ApplicationHandler for App {
                     // The one key that drives the energy rather than the bloom.
                     Key::Named(NamedKey::Enter) => self.st.add_pulse(Drop::Heavy),
 
+                    // Before the catch-all below, which blooms on any other character.
+                    Key::Character("t") | Key::Character("T") => {
+                        self.st.tint = !self.st.tint;
+                        if self.st.tint {
+                            self.st.legend();
+                        } else {
+                            println!("  layer colours off");
+                        }
+                    }
+
                     // Supersampling is a render-quality knob, not a motion one.
                     Key::Character("-") => self.st.ss = self.st.ss.saturating_sub(1).max(1),
                     Key::Character("=") | Key::Character("+") => {
@@ -1040,9 +1059,31 @@ fn main() {
     let loop_secs = cfg.frames as f32 / fps;
     let disc = layers.iter().map(|l| l.outer.max_radius()).fold(0.0f32, f32::max);
 
-    // Walk the artwork once for its letters and symbols, so the viewer can light one.
-    let catalogue = imagespin::glyphs::find(&src, cfg.center, disc);
-    println!("  {} glyphs found in the artwork", catalogue.len());
+    // The canvas the shader samples: drawn outside the hand-over, photographed inside.
+    // Coordinates stay in the scan's space; `canvas_scale` is only texture density.
+    let canvas_scale = 2.0;
+    let nominal = [src.width() as f32, src.height() as f32];
+    let canvas = sigil::over(&cfg, &sigil::Figure::default(), &src, canvas_scale);
+    println!(
+        "  canvas {}x{} ({}x the artwork)",
+        canvas.width(),
+        canvas.height(),
+        canvas_scale
+    );
+
+    // Walk it once for its letters and symbols, so the viewer can light one. The canvas
+    // rather than the scan, which no longer agrees with it about where a letter is.
+    // Scaled back down first: the size filters are in artwork pixels.
+    let catalogue = {
+        let at_artwork = image::imageops::resize(
+            &canvas,
+            src.width(),
+            src.height(),
+            image::imageops::FilterType::Lanczos3,
+        );
+        imagespin::glyphs::find(&at_artwork, cfg.center, disc)
+    };
+    println!("  {} glyphs found on the canvas", catalogue.len());
     let ss = 2;
     let st = State {
         speed: layers.iter().map(|l| l.turns as f32 / loop_secs).collect(),
@@ -1050,6 +1091,7 @@ fn main() {
         bloom: vec![0.0; layers.len()],
         names: layers.iter().map(|l| l.name.clone()).collect(),
         ss,
+        tint: false,
         rng: rand::make_rng(),
         pulses: Vec::new(),
         bolts: Vec::new(),
@@ -1074,19 +1116,6 @@ fn main() {
 
     help();
     st.describe();
-
-    // The linework is drawn over the photograph at a multiple of its size. The rings and
-    // rules stop being limited to the raster grid; the lettering is unchanged until it too
-    // is drawn. Coordinates stay in the photograph's space throughout.
-    let canvas_scale = 2.0;
-    let nominal = [src.width() as f32, src.height() as f32];
-    let canvas = sigil::over(&cfg, &sigil::Figure::default(), &src, canvas_scale);
-    println!(
-        "  canvas {}x{} ({}x the artwork)",
-        canvas.width(),
-        canvas.height(),
-        canvas_scale
-    );
 
     let uni = gpu::uniforms(&cfg, &layers, &canvas, nominal, ss);
     let mut app = App {

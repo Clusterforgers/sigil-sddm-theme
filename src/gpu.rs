@@ -1,9 +1,3 @@
-//! The GPU side of the real-time renderer: uniform layout, textures, pipeline.
-//!
-//! Shared by the viewer (`src/bin/live.rs`) and the benchmark (`src/bin/bench.rs`) so
-//! both measure and draw exactly the same thing. The shader itself is
-//! `shaders/spin.wgsl`; this module only feeds it.
-
 use crate::config::{parse_hex, Config};
 use crate::geom::{Boundary, Layer};
 
@@ -48,7 +42,7 @@ pub struct Uniforms {
     pub params: [f32; 4],
     /// live pulses, live flares, live bolt segments, collapse flash
     pub counts: [f32; 4],
-    /// (mip level to read the artwork at, unused, unused, unused)
+    /// (mip level to read the artwork at, layer-tint strength, unused, unused)
     pub misc: [f32; 4],
     /// (min x, min y, max x, max y) around the lit glyphs where they sit in the
     /// artwork, for skipping the pass that hides them

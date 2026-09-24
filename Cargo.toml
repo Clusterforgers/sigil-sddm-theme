@@ -20,6 +20,7 @@ rand = { version = "0.10", default-features = false, features = ["std", "sys_rng
 wgpu = "30"
 winit = "0.30"
 tiny-skia = "0.12"
+ttf-parser = "0.25"
 
 [profile.release]
 opt-level = 3

@@ -1,10 +1,3 @@
-//! Hough-style polygon fitting.
-//!
-//! A drawn polygon outline is bright exactly where the boundary lies, so we score a
-//! hypothesis `(sides, circumradius, phase)` by the mean image brightness along its
-//! outline and keep the local maxima. This beats fitting angular harmonics, which get
-//! swamped by the lettering.
-
 use crate::geom::Boundary;
 use image::RgbImage;
 use rayon::prelude::*;

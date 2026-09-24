@@ -37,6 +37,42 @@ Two constraints worth knowing:
 - `turns` is a **signed integer** count of revolutions per loop, and the angle is
   reduced modulo the frame count in integer arithmetic. Frame `N` is therefore
   bit-identical to frame 0 — the loop is seamless by construction, not by luck.
+- **Positive `turns` is counter-clockwise on screen.** Both renderers sample the artwork
+  at `alpha - theta`, so a feature is found where `alpha = a + theta`, and `pt` measures
+  alpha counter-clockwise from North. To settle it by measurement rather than by reading:
+  render two frames, take a brightness profile of one radius band over 720 angular bins in
+  each, and cross-correlate. A layer at `turns: 2` over 90 frames moves +8° per frame.
+- To see which layer owns which ring, **paint them**: `t` in the viewer, or
+  `imagespin render --frames 1 --tint --png-frames out/` for a still. Each layer takes a
+  hue of its own, outermost first — red, orange, yellow, green, cyan, blue, magenta —
+  and both print the legend with each layer's `turns` beside its colour. Only the hue is
+  replaced; luminance still carries the artwork, so the lettering stays readable. Note
+  that the colours show **layers, not motion**: three of them currently share a rate, so
+  cyan, blue and magenta move as one body despite being painted apart.
+- Which layer owns a drawn ring is **not** obvious from the radii in `layers.json`. The
+  cuts are polygons of two different phases, and a ring belongs to whichever layer its
+  whole outline lands in, so a ring can sit in a layer whose nominal radii look wrong for
+  it. Two things follow. The heptagons at 153.5 and 121.5 read as a nested pair but fall
+  either side of the cut at 127, so they turned opposite ways; and each row of names
+  stands a few units off a heptagon and is one ornament with it, so a row in a different
+  layer walks along its own line. `nothing_turns_against_what_it_is_drawn_on` pins both.
+
+  The price: everything inside the cut at 182 now turns as one body, since the row on
+  153.5 must move with that heptagon, which must move with 121.5, which cannot be
+  separated from the pentagram. Four independent motions rather than six.
+
+  The heptagram and the heptagons at 217.5 and 186 are one layer on purpose: those two are
+  the ribbon's own envelopes, tangent to its edges, so separating them would let the star
+  slide across its own tangents.
+
+  No cut can put them in the same layer: one below the heptagon at 121.5 needs a
+  circumradius of at most 119.5, and one clearing the pentagram's points at 108.6 needs at
+  least 120.5. So they are given the **same `turns` instead**, which comes to the same
+  thing — two layers at one rate have no motion between them and no boundary to see.
+
+- Watch for a layer sharing a *speed* with a neighbour it is not meant to read with.
+  Direction is not enough: at ±2 the core read as belonging to the star rather than to its
+  own pair. That is what `assert_ne!(pair.abs(), star.abs())` is for.
 
 ## Live viewer
 
@@ -56,6 +92,7 @@ lightning arcs across the formation, both without any input.
   1-9          bloom that specific layer
   Space        bloom every layer at once
   Enter        a heavy drop into the middle
+  t            colour each layer differently, to see which ring is which
   - / =        supersampling down / up (antialiasing vs framerate)
   F1           help                              Esc  quit
 ```
@@ -227,16 +264,39 @@ do not coincide once the layers have turned.
 
 ### The canvas
 
-What gets uploaded is not the photograph. The linework is **drawn over it** at twice its
-size, so the rings and rules are paths rather than pixels; the lettering is still the
-photograph until it too is drawn.
+What gets uploaded is not the photograph. Some of the linework is **drawn over it** at twice
+its size, so those rings and rules are paths rather than pixels; everything else is still
+the photograph until it too is drawn.
 
 This is worth doing because magnification cannot be filtered away. Rendered at 2.88x, our
 output is indistinguishable from a Lanczos upscale of the same region — both show the same
 scalloped edge, because the source's own edge ramp is only ~1.5 px wide. Sampling cannot
 recover an edge that was never captured. Drawing the line does, because a line is geometry.
-The drawn stroke has to be at least as wide as the one underneath, or the ragged original
-shows along its edges.
+
+Two rules decide what may be drawn, and the second is the one that bites.
+
+**It must actually be there.** `imagespin fit` and `gaps` score a hypothesis by mean
+brightness along its outline, so a radius that merely runs *along* a band of lettering or a
+row of crosses scores as well as a rule does. Heptagons at 139 and 171 are not lines at
+all; drawn, they ran straight through `Madimi` and `Hagonel`.
+
+A sweep settles it where a score cannot. Fire rays from the centre at seven angles — some
+through an apothem, some a half-step off — and fit `r = apothem / cos(theta - phase)` to
+where each first lights up. A line obeys that at every angle to within a pixel; a row of
+crosses drifts. 186 and 217.5 obey it exactly and are real.
+
+**It must sit wholly inside one layer.** The two sides of a cut turn at different rates, so
+a line spanning one comes apart at the boundary as the plate rotates. This is invisible in a
+still, which is why `nothing_drawn_crosses_a_layer_cut` exists. It cost the heptagram, whose
+chords run from r=314 in to 196 and so cross the cut at 307 near both ends of every chord,
+and the dividers that ran from the big heptagon out to the circle. The 40 outer dividers
+start at 353.6 rather than on the circle at 352 for the same reason: a one-unit sliver on
+the far side of the cut turns the other way.
+
+Two heptagons that survive both tests were found this way and are drawn: 352.5 and 314, both
+with a vertex due North. Each was fitted by sweeping rays at seven angles and matching
+`r = apothem / cos(theta - phase)`; both land within a pixel at every one of them, which is
+exactly what a row of crosses does not do.
 
 The texture is therefore denser than the coordinate space `layers.json` is written in. Every
 lookup is in normalised uv so nothing downstream cares, but two things do: `src_size` stays
@@ -356,9 +416,145 @@ imagespin draw --over-source            # drawing in red over the source in gree
 imagespin glyphs                        # ring every letter and symbol that was found
 ```
 
-So far it draws only the line work — the gold band, the two circles, the 40-cell ring, the
-names heptagon, the heptagram, the nested heptagons and the pentagram. The text and the
-crosses are still to come, so the viewer deliberately does not use it yet.
+Nearly all of it is drawn: the gold band, the two circles, the forty lettered cells, the
+two heptagons below them and the forty-nine single letters between, the crosses in the lens,
+the seven names, the heptagram, the four rings of spirit names, and the core — the pentagram
+ribbon, the seven letters ringing it, the four in its arms, the five names inside it and the
+words around the cross at the centre.
+
+**What is still photographed:** the chains of crosses running along the heptagram's ribbon,
+and two loose crosses per wedge in its spandrels. Nothing else.
+
+### Finding what is left
+
+Comparing a 2000px scan against a drawing by eye does not scale. `dump_blobs` (ignored by
+default) does it properly: it paints the drawing's own linework out of the scan — the two
+coincide to within a pixel — so that crosses touching a rule stop being swallowed by the
+ruling's connected network, flood-fills what remains, and reports each blob in polar
+coordinates with whether the drawing has ink there.
+
+```
+cargo test --release -- --ignored --nocapture dump_blobs
+```
+
+Folding the angles modulo 51.43° collapses the plate's seven-fold symmetry, which is how the
+seven crosses in the heptagram's tip triangles turned out to be at exactly r=236.9 on the
+vertices, and how the core's letters turned out **not** to be on any regular step — the plate
+places those by eye, as much as seventeen degrees off.
+
+### The heptagram
+
+The plate draws it as a woven ribbon, not a line, so what is stroked is a **pair** of stars:
+offsetting every chord inwards by the ribbon's width gives another star of the same phase,
+smaller by the width divided by the cosine of the step. Its measurements came out exact, and
+they explain three other things at once:
+
+```
+outer edge, closest approach   195.8   = apothem of the heptagon at 217.5   (195.96)
+inner edge, closest approach   167.6   = apothem of the heptagon at 186     (167.58)
+ribbon width                    28.2
+points                         314     = vertices of the letter ring's heptagon
+```
+
+So the two heptagons that the pixel-counting pass had written off are the ribbon's own
+envelopes, drawn along the lines it never crosses. Nothing here was fitted to make that come
+out; the radii were read off seven ray sweeps and the tangencies fell out.
+
+The points are the problem. They land exactly on the letter ring's inner corners, and two
+things that touch cannot turn at different rates — no cut can pass between them, at any
+radius. The letter ring's heptagon was therefore widened from 314 to **318** and the cut put
+at 316, which opens four units for it. That is a visible notch at each of the seven points,
+and it is the price of the two rings turning separately; the alternative was to merge them
+into one layer and let the star and the letter ring turn as one.
+
+### The rings of spirit names
+
+Four rings of seven, each name centred on the middle of one heptagon edge, with a short run
+of crosses off either end. Both the names and the crosses are set at a constant distance
+**perpendicular to the edge below them**, not at a constant radius: offsetting a regular
+polygon that way gives a similar polygon, so a row laid along it keeps its clearance and
+swings outward towards each corner, exactly as the plate has it. A row on a circle would
+wander off its edge and, worse, would cross a cut.
+
+Clockwise from the wedge due North — where the plate sets single letters rather than names:
+
+```
+El      Me       Ese    Iana     Akele   Azdobn   Stimcul
+I       Heeon    Ih     Beigia   Ir      Stimcul  Dmal
+S       Ab       Ath    Ized     Ekiei   Madimi   Esemeli
+E       An       Ave    Liba     Rocle   Hagonel  Ilemese
+```
+
+`Ekiei` is the least certain of these; `Ized` may be `Izeth`. The third ring stands eleven
+units off its heptagon where the others stand nine and a half, because the cut between the
+third and fourth layers runs four and a half above that heptagon and at nine and a half the
+crosses hang across it — as the plate's own do, which is one of the places it shears.
+
+### Handing over
+
+### Handing over
+
+While both exist they must not both print. The drawing has started to say the same things
+the scan says, in slightly different places, and the composite came out double-struck. So
+`over` is a **hand-over**, not an overlay: the scan is cleared wherever the drawing has taken
+over, and the drawing leaves out whatever it does not own.
+
+That is not a single radius any more, because the heptagram is not an annulus — it reaches
+most of the way to the middle. The scan is cleared in three shapes: outside
+`Figure::handover`, the letter ring's inner heptagon; along the heptagram's two star paths,
+stroked wide enough to take the scan's own line with them; and along the slice of each
+spirit ring the drawing fills. Clearing the heptagram's whole band would be easier and is
+wrong — the plate sets crosses inside it, and those are still the photograph's to draw.
+
+As more of the figure is drawn the cleared shapes grow, and when the last of it is drawn the
+scan goes.
+
+The offline GIF renders from this canvas too, at the scan's own size — `Renderer` takes its
+radii in scan pixels and works its scale out from the image width, so a denser canvas would
+silently halve every radius in `layers.json`. It has to: the cuts belong to the drawing now,
+and the bare scan run through them would shear where they no longer match it.
+
+The viewer's glyph catalogue is built from the canvas rather than from the photograph for
+the same reason: outside the hand-over the two no longer agree about where a letter is, and
+lighting one that has been redrawn elsewhere lights empty ground.
+
+### Reading the lettering
+
+Everything written on the plate had to be read off the scan, because there is no other
+source for it. A polar unroll of each ring at six times its own resolution makes the hand
+legible; below is what it says, and where it is genuinely ambiguous that is said rather
+than smoothed over.
+
+The forty outer cells hold a letter and a number, in either order, and six hold a single
+character. Clockwise from the divider due North, outer row then inner:
+
+```
+4/T  9/G  7/n  t/9  22/h  n  6/m  22/o  20/a  4/n
+6/a  h    18/o 23/f l/p   n  l/8  7/G   13/r  H/D
+og   y/15 t/n  o/8  e/21  10/6 11/A 15/r 8/a  r/16
+n    6/A  o/10 s/G  h/14  o/17 s    4/5  a/24 6/w
+```
+
+The forty-nine cells between the two heptagons hold one letter each, seven to an edge,
+clockwise from the vertex due North; the last is a cross rather than a letter:
+
+```
+Z l l R H i a   a Z C a a c b   p a u p n h r   h d m h i a t
+k k a a e e e   i i e e l l l   e e l l M G +
+```
+
+Least certain, and worth a second opinion if it matters: the outer ring's `t/9`, `23/f`,
+`og`, `e/21`, `r/16` and `6/w`, and the letter ring's `b` and final `t`. `22` may be a
+ligature rather than a number. Not transcribed at all: the seven devices in the lens above
+the letter ring — a circled monogram, `H 14`, `T 9`, `XE 21`, `L p`, `A 24`, `G s` — which
+are sigils rather than text.
+
+Two departures from the source, both forced by the layer cuts: the seven names are set on
+arcs at r=262, where the plate sets them along the heptagon edges from 265 out to 282 — on
+a chord they straddle the cut at 276.6 and would shear.
+
+The face is DejaVu Serif: wrong for a 16th-century plate, but available offline and
+unambiguously redistributable. One constant in `src/text.rs` changes it.
 
 The radii came from a radial brightness sweep (406.5, 393.5, 384, 352) and from
 `imagespin fit`, and they are **not** the ones in `layers.json`: those are cut lines,
@@ -369,8 +565,15 @@ One trap is worth knowing about. `Boundary::Poly(n, r, phase)` puts the **apothe
 `phase` — a flat edge faces that way, with the vertices half a step to either side —
 although `geom.rs` describes it as a vertex. Drawing a polygon half a step out of step
 with the boundary meant to cut around it is invisible in a still and obvious the moment it
-rotates. `imagespin check` catches it: against a correct drawing it reports every divider
-clean, exactly as it does for the photograph.
+rotates.
+
+### Which guard to believe
+
+`imagespin check` scores each cut against **the photograph**, and now reports two of them
+cutting art. That is expected: the cut between the letter ring and the heptagram was moved
+to 316 to open a gap the plate does not have. The guard that matters from here on is
+`nothing_drawn_crosses_a_layer_cut`, which scores against **the drawing** — every ring,
+polygon, run of lettering (by its real outline points) and cross.
 
 ## Tuning a different image
 
@@ -393,9 +596,11 @@ visually identical.
 
 `1920x1080`, 450 frames at 25 fps (18 s loop), 51 MB.
 
-Layer periods: outer ring static; character cells and seven names 18 s per revolution;
-heptagram, spirit names and core 9 s; cross band 6 s. The fastest layer advances
-2.4° per frame.
+Layer periods: outer ring static; character cells and letter ring 18 s per revolution;
+heptagram 9 s; spirit names, cross band and core 6 s. The fastest layer advances
+2.4° per frame. Counter-clockwise: the character cells, and everything from the cut at
+182 inwards. Clockwise: the letter ring, and the heptagram with the two heptagons it is
+tangent to.
 
 `spin.mp4` is the same animation as h264 (crf 22, 11 MB) for anywhere a GIF is too heavy.
 
