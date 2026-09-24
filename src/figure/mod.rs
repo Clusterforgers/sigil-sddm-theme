@@ -6,6 +6,7 @@
 //!                                                             └─▶ composite() one flat PNG
 //! ```
 
+mod build;
 mod elements;
 mod error;
 mod pen;
@@ -93,6 +94,7 @@ impl Figure {
         let extents: Vec<[f32; 2]> = marks.iter().map(|m| render::extent(m, c)).collect();
         let disc = extents.iter().map(|e| e[1]).fold(0.0, f32::max);
         let frame = render::frame(c, disc);
+        let moments = build::choreograph(&marks, &extents, c, disc);
 
         let layers = self
             .spec
@@ -100,11 +102,17 @@ impl Figure {
             .iter()
             .zip(&marks)
             .zip(&extents)
-            .map(|((spec, marks), &extent)| LayerImage {
-                name: spec.name.clone(),
-                turns: spec.turns,
-                extent,
-                image: render::layer_image(marks, frame, scale),
+            .zip(&moments)
+            .map(|(((spec, marks), &extent), when)| {
+                let (reveal, reveal_side) = render::reveal_map(marks, when, frame, scale);
+                LayerImage {
+                    name: spec.name.clone(),
+                    turns: spec.turns,
+                    extent,
+                    image: render::layer_image(marks, frame, scale),
+                    reveal,
+                    reveal_side,
+                }
             })
             .collect();
 

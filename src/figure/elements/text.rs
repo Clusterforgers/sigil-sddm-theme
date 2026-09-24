@@ -105,9 +105,10 @@ impl Draw for Text {
             let a = slot(k, n, self.rotate);
             for (s, r) in self.lines(item, track.radius_at(a)) {
                 match Symbol::from_token(s) {
-                    // A symbol stands on the baseline, a little larger than a capital.
+                    // A symbol stands on the baseline as tall as a capital, so it reads as
+                    // one more letter in the run rather than an ornament dropped on it.
                     Some(Ok(sym)) => {
-                        let size = self.size * 1.3;
+                        let size = pen.font().cap_height(self.size);
                         sym.draw(pen, pt(pen.center(), r + size * 0.5, a), size, -a);
                     }
                     _ => pen.text(a, r, self.size, s, self.orient),

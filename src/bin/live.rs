@@ -2,9 +2,6 @@ use imagespin::effects::{Census, Effects};
 use imagespin::gpu::{self, Gpu, Uniforms};
 use imagespin::figure::{self, Figure, FigureError, Rendered};
 
-use rand::rngs::SmallRng;
-use rand::RngExt;
-
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::mpsc::Receiver;
@@ -53,16 +50,12 @@ struct Worst {
 struct State {
     /// Revolutions per second, positive clockwise, from each layer's `turns`.
     speed: Vec<f32>,
-    /// Each layer's current turn: radians, counter-clockwise, as the shader wants it.
-    angle: Vec<f32>,
     /// Names of the layers.
     names: Vec<String>,
     /// Supersampling factor, 1-4.
     ss: u32,
     /// Paint each layer in its own colour, for telling which ring turns with which.
     tint: bool,
-    /// Picks the layer an unassigned key blooms.
-    rng: SmallRng,
 }
 
 impl State {
@@ -89,8 +82,7 @@ impl State {
         for (i, name) in self.names.iter().enumerate() {
             println!("    {}  {:<18}  {:>6.3} rev/s   {}", i + 1, name, self.speed[i], self.period(i));
         }
-        println!("\n  press any key to bloom a random layer — 1-{} pick one, Space blooms all",
-            self.names.len().min(9));
+        println!("\n  F1 for the keys");
     }
 
     /// Seconds per revolution and which way.
@@ -103,42 +95,35 @@ impl State {
         }
     }
 
-    /// Take on the layers of `fig`. A layer that was there before, by name, carries on
-    /// from the angle it had reached, so saving an edit does not make everything jump.
+    /// Take on the names and speeds of `fig`'s layers, for the listings.
     fn adopt(&mut self, fig: &Rendered) {
         let loop_secs = fig.loop_secs.max(1e-3);
-        self.angle = fig
-            .layers
-            .iter()
-            .map(|l| self.names.iter().position(|n| *n == l.name).map_or(0.0, |i| self.angle[i]))
-            .collect();
         self.speed = fig.layers.iter().map(|l| l.turns as f32 / loop_secs).collect();
         self.names = fig.layers.iter().map(|l| l.name.clone()).collect();
-    }
-
-    /// Which layer an unassigned key lights up: a fresh draw on every press, so
-    /// holding the same key keeps moving the bloom around.
-    fn random_layer(&mut self) -> usize {
-        self.rng.random_range(0..self.names.len().max(1))
     }
 }
 
 fn help() {
     println!(
         r#"
-  imagespin live — the sigil turns at a fixed rate; keys make it bloom and pulse
+  imagespin live — the sigil draws itself in, turns, and answers what you do
 
-    any key      bloom a random layer
-    1-9          bloom that specific layer
-    Space        bloom every layer at once
-    Enter        the surge: blood drops, the figure spins up, explodes and breaks apart
-    t            colour each layer differently, to see which ring is which
-    - / =        supersampling down / up (antialiasing vs framerate)
+    typing       each character lights one more letter; Backspace puts it out
+    Enter        the surge: the figure spins up, explodes and breaks apart
+    mouse        ripples follow the pointer, and letters near it glow
+
+    F2           a wave of colour across the figure
+    F3           burn a layer away to embers and let it grow back
+    F4           set a run of letters flickering through other letters
+    F5           link a few letters across the rings with threads of light
+    F6           colour each layer differently, to see which ring is which
+    F7 / F8      supersampling down / up (antialiasing vs framerate)
+    F9           bloom every layer at once
     F1           this help
     Esc          quit
 
-  Now and then a ring of blood closes in from the rim and bursts, while blue lightning
-  arcs from one part of the formation to the next. Neither needs a key.
+  Everything else happens on its own: lightning, colour, embers, letters lifting off.
+  How often is set in the `effects` section of the figure file.
 "#
     );
 }
@@ -256,11 +241,6 @@ impl App {
         self.last = now;
 
         self.fx.advance(dt);
-        // Each layer at its own fixed rate, unless the surge has it spinning up. Speeds
-        // are clockwise; the angle the shader wants runs the other way.
-        for (i, (a, &s)) in self.st.angle.iter_mut().zip(&self.st.speed).enumerate() {
-            *a -= self.fx.spin_rate(i, s) * dt * std::f32::consts::TAU;
-        }
 
         // Fit the canvas into the window, preserving aspect.
         let [sw, sh] = self.fig.canvas;
@@ -274,16 +254,7 @@ impl App {
         self.uni.quality[0] = self.st.ss as f32;
         self.uni.quality[3] = source_lod(scale, self.st.ss, self.fig.scale);
         self.uni.look[1] = if self.st.tint { 1.0 } else { 0.0 };
-        for (l, &a) in self.uni.layers.iter_mut().zip(&self.st.angle) {
-            // The shader rotates by this angle rather than un-rotating an arctangent, so
-            // hand it the sin/cos instead of making every pixel recompute them. Slot 1 is
-            // the bloom, which `Effects::write` fills in.
-            let (s, c) = a.sin_cos();
-            l.motion[0] = a;
-            l.motion[2] = s;
-            l.motion[3] = c;
-        }
-        self.fx.write(&mut self.uni, &self.st.angle);
+        self.fx.write(&mut self.uni);
 
         gfx.queue.write_buffer(&gfx.gpu.ubuf, 0, bytemuck::bytes_of(&self.uni));
 
@@ -356,16 +327,21 @@ impl ApplicationHandler for App {
                 event: KeyEvent { logical_key, state: ElementState::Pressed, .. },
                 ..
             } => {
-                // Nothing here changes how fast anything turns — keys only light things up.
+                // Every printable key is typing, as it will be on a login screen; everything
+                // the viewer itself offers sits on the function keys, out of its way.
                 match logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => elwt.exit(),
-                    Key::Named(NamedKey::F1) => help(),
-
-                    // The one key that drives the energy rather than the bloom.
                     Key::Named(NamedKey::Enter) => self.fx.surge(),
+                    Key::Named(NamedKey::Backspace) => self.fx.backspace(),
+                    Key::Named(NamedKey::Space) => self.fx.key(),
+                    Key::Character(_) => self.fx.key(),
 
-                    // Before the catch-all below, which blooms on any other character.
-                    Key::Character("t") | Key::Character("T") => {
+                    Key::Named(NamedKey::F1) => help(),
+                    Key::Named(NamedKey::F2) => self.fx.color_wave(),
+                    Key::Named(NamedKey::F3) => self.fx.dissolve(),
+                    Key::Named(NamedKey::F4) => self.fx.scramble(),
+                    Key::Named(NamedKey::F5) => self.fx.constellation(),
+                    Key::Named(NamedKey::F6) => {
                         self.st.tint = !self.st.tint;
                         if self.st.tint {
                             self.st.legend();
@@ -373,35 +349,21 @@ impl ApplicationHandler for App {
                             println!("  layer colours off");
                         }
                     }
-
                     // Supersampling is a render-quality knob, not a motion one.
-                    Key::Character("-") => self.st.ss = self.st.ss.saturating_sub(1).max(1),
-                    Key::Character("=") | Key::Character("+") => {
-                        self.st.ss = (self.st.ss + 1).min(4)
-                    }
-
-                    Key::Named(NamedKey::Space) => self.fx.bloom.light_all(),
-
-                    // 1-9 name a layer; every other key draws one at random.
-                    Key::Character(s) => {
-                        for c in s.chars() {
-                            match c.to_digit(10) {
-                                Some(d) if d >= 1 => self.fx.bloom.light(d as usize - 1),
-                                _ => {
-                                    let i = self.st.random_layer();
-                                    self.fx.bloom.light(i);
-                                }
-                            }
-                        }
-                    }
-
-                    // Every remaining key still blooms something.
-                    _ => {
-                        let i = self.st.random_layer();
-                        self.fx.bloom.light(i);
-                    }
+                    Key::Named(NamedKey::F7) => self.st.ss = self.st.ss.saturating_sub(1).max(1),
+                    Key::Named(NamedKey::F8) => self.st.ss = (self.st.ss + 1).min(4),
+                    Key::Named(NamedKey::F9) => self.fx.bloom.light_all(),
+                    _ => {}
                 }
             }
+
+            // The pointer, turned from window pixels into canvas units by undoing the fit.
+            WindowEvent::CursorMoved { position, .. } => {
+                let [scale, ox, oy, _] = self.uni.fit;
+                let at = [(position.x as f32 - ox) / scale, (position.y as f32 - oy) / scale];
+                self.fx.pointer(Some(at));
+            }
+            WindowEvent::CursorLeft { .. } => self.fx.pointer(None),
 
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
@@ -444,11 +406,9 @@ fn main() -> ExitCode {
     let ss = 2;
     let mut st = State {
         speed: Vec::new(),
-        angle: Vec::new(),
         names: Vec::new(),
         ss,
         tint: false,
-        rng: rand::make_rng(),
     };
     st.adopt(&fig);
 

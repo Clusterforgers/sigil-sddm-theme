@@ -17,6 +17,16 @@ struct Fields {
     // hot core, blue halo
     arc: vec2<f32>,
     flare: f32,
+    // the colour waves: rgb weighted by strength, total strength
+    tint: vec4<f32>,
+    // the gliding light on the gilt
+    sheen: f32,
+    // constellation threads, the pointer's ripples, how near the pointer is, the glow of
+    // typed letters on the ground
+    threads: f32,
+    ripple: f32,
+    near: f32,
+    halo: f32,
 };
 
 fn fields_at(p: vec2<f32>) -> Fields {
@@ -25,6 +35,12 @@ fn fields_at(p: vec2<f32>) -> Fields {
     f.blood = pulse_at(length(d));
     f.arc = bolt_at(p);
     f.flare = flare_at(p);
+    f.tint = tint_at(length(d));
+    f.sheen = sheen_at(p);
+    f.threads = threads_at(p);
+    f.ripple = ripples_at(p);
+    f.near = near_at(p);
+    f.halo = marks_halo(p);
     return f;
 }
 
@@ -86,22 +102,82 @@ fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
         // radially here needs no correction for the layer's own angle. This is what stops
         // the ring reading as a colour laid over the artwork instead of as something
         // happening to it.
-        let qr = length(q - u.center);
-        let qw = u.center + (q - u.center) * ((qr + warp * WARP_GAIN) / max(qr, 1e-3));
+        // The heat haze wavers it first, in the layer's own frame so it moves with the ink.
+        let qh = q + haze_at(q, k);
+        let qr = length(qh - u.center);
+        let qw = u.center + (qh - u.center) * ((qr + warp * WARP_GAIN) / max(qr, 1e-3));
 
         // Read the artwork at a level matched to how hard it is being shrunk. The window
         // decides that, not the pixel, so the level is worked out once on the CPU.
         var ink = art(qw, k, u.quality.w);
+        // As the figure builds itself, only what has been drawn so far is there.
+        ink = built(ink, qh, k);
+
+        // A fast spin leaves echoes: the layer as it was a moment ago, and before that,
+        // each fainter and softer, drawn under it. Each step back turns by one more lag,
+        // done by rotating the sin/cos rather than calling the trig again.
+        let lag = L.form.w;
+        // Only a genuinely fast spin shows them: at the layers' own speeds the lag is a few
+        // hundredths of a radian, which would just smear every letter.
+        if (u.live2.w > 0.0 && abs(lag) > 0.08) {
+            let cl = cos(lag);
+            let sl = sin(lag);
+            var ec = c;
+            var es = s;
+            var w = 0.5 * u.live2.w * smoothstep(0.08, 0.35, abs(lag));
+            for (var j = 0; j < 3; j = j + 1) {
+                let nc = ec * cl + es * sl;
+                es = es * cl - ec * sl;
+                ec = nc;
+                let qe = u.center + vec2<f32>(dl.x * ec - dl.y * es, dl.y * ec + dl.x * es);
+                let e = built(art(qe, k, u.quality.w + 0.8), qe, k) * w;
+                ink = vec4<f32>(ink.rgb + e.rgb * (1.0 - ink.a), ink.a + e.a * (1.0 - ink.a));
+                w = w * 0.55;
+            }
+        }
 
         // A glyph that has lifted off leaves its slot empty; the copy is drawn somewhere
-        // else entirely, at the end, in a frame this loop cannot clip. One box around the
-        // lit glyphs, tested once: the groups are clusters, so almost every pixel leaves.
-        if (u.live.w > 0.0 && q.x >= u.gbox.x && q.y >= u.gbox.y
+        // else entirely, at the end, in a frame this loop cannot clip. A scrambling letter
+        // has another drawn over its slot. One box around both, tested once: they come in
+        // clusters, so almost every pixel leaves here.
+        if (u.live.w + u.rhythm.x + u.live2.z > 0.0 && q.x >= u.gbox.x && q.y >= u.gbox.y
             && q.x <= u.gbox.z && q.y <= u.gbox.w) {
             ink = ink * (1.0 - glyph_hide(q, k));
+            if (u.rhythm.x > 0.0) {
+                let sw = swapped_at(q, k);
+                ink = ink * (1.0 - sw.hide) + sw.ink;
+            }
+            // Letters lit by typing burn hot.
+            if (u.live2.z > 0.0) {
+                ink = vec4<f32>(ink.rgb + ink.rgb * MARK * marks_at(q, k), ink.a);
+            }
         }
 
         ink = ink * L.form.y;
+
+        // A dissolve burns the layer away; the ink along the burning edge glows.
+        if (L.form.z > 0.0) {
+            let burnt = burn(q, k, L.form.z);
+            let a = ink.a;
+            ink = ink * burnt.x;
+            ink = vec4<f32>(ink.rgb + EMBER * (burnt.y * a * 2.5), ink.a);
+        }
+
+        // A colour wave passing recolours the gold, keeping its light and dark.
+        if (f.tint.w > 0.002) {
+            let lum = dot(ink.rgb, LUMA);
+            let c = f.tint.rgb / f.tint.w;
+            ink = vec4<f32>(mix(ink.rgb, c * lum * 1.8, min(f.tint.w, 1.0) * 0.85), ink.a);
+        }
+
+        // Light catching the gilt where the gliding band crosses it.
+        ink = vec4<f32>(ink.rgb + SHEEN * (dot(ink.rgb, LUMA) * f.sheen * 1.6), ink.a);
+
+        // The slow breath of the whole figure.
+        ink = vec4<f32>(ink.rgb * breath(k), ink.a);
+
+        // The pointer: letters near it glow, and its ripples light the ink they cross.
+        ink = vec4<f32>(ink.rgb + ink.rgb * HOVER * (f.near * 0.9 + f.ripple * 1.4), ink.a);
 
         // Which layer this is, said in colour. Only the hue is replaced.
         if (u.look.y > 0.0) {
@@ -161,7 +237,10 @@ fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
         && p.x <= u.gbox_p.z && p.y <= u.gbox_p.w) {
         risen = glyph_ghost(p);
     }
-    return col + SPARK_CORE * arc.x + risen;
+    // The constellation threads and the typed letters' glow are light in their own right,
+    // on top of everything; the ripples leave a faint trace on the ground too.
+    let answer = THREAD * f.threads + MARK * f.halo + HOVER * (f.ripple * 0.08 + f.near * 0.02);
+    return col + SPARK_CORE * arc.x + risen + answer;
 }
 
 @vertex

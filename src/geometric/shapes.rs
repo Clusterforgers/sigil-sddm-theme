@@ -37,12 +37,24 @@ pub fn star_inside(r: f32, skip: usize, n: usize, width: f32) -> f32 {
 ///
 /// The lens closes to nothing where the floor rises to meet the roof and opens to its
 /// deepest where it falls away, so a symbol set at one size would either burst the narrow
-/// end or rattle around in the wide one. It hangs from the roof either way.
+/// end or rattle around in the wide one. It hangs from the roof, and shrinks until the
+/// floor is clear under the whole of it — not just under its middle, since near a corner
+/// the floor rises steeply across the width of the symbol itself.
 pub fn lens_fit(floor: &Track, roof: f32, biggest: f32, alpha: f32) -> (f32, f32, f32) {
-    // 1.6, not 1.0: a symbol may spill well past the floor rather than shrink to nothing,
-    // and only the very tips of the lens really pinch.
-    let size = biggest.min((roof - floor.radius_at(alpha)) * 1.6).max(1.0);
-    let r = roof - size * 0.5 - 1.5;
+    // Clear space kept from each line, its own width included.
+    const CLEAR: f32 = 2.0;
+    let centre = |size: f32| roof - CLEAR - size * 0.5;
+    let mut size = biggest;
+    // The width depends on the size and the room on the width, so settle the two together.
+    for _ in 0..8 {
+        let half = size * 0.5 / centre(size).max(1.0);
+        let highest = [alpha - half, alpha, alpha + half]
+            .map(|a| floor.radius_at(a))
+            .into_iter()
+            .fold(0.0, f32::max);
+        size = biggest.min(roof - highest - 2.0 * CLEAR).max(1.0);
+    }
+    let r = centre(size);
     (-r * alpha.sin(), -r * alpha.cos(), size)
 }
 

@@ -25,9 +25,12 @@ struct Args {
     frames: u32,
     /// Write the rendered frame here, for checking a change did not alter the picture.
     out: Option<String>,
-    /// Instead of the stress scene: press Enter, run the real effects this many seconds,
-    /// and render that moment. For seeing the surge without a window.
-    surge: Option<f32>,
+    /// Instead of the stress scene: run the real effects this many seconds and render that
+    /// moment. For seeing them without a window.
+    run: Option<f32>,
+    /// Set this off at the start of the run: `surge`, `color`, `dissolve`, `scramble` or
+    /// `constellation`; or keep it up through the run: `typing` or `hover`.
+    trigger: Option<String>,
     figure: String,
 }
 
@@ -44,7 +47,8 @@ fn parse_args() -> Args {
         lift: 10.0,
         frames: 120,
         out: None,
-        surge: None,
+        run: None,
+        trigger: None,
         figure: "figure.json5".into(),
     };
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -68,7 +72,13 @@ fn parse_args() -> Args {
             "--frames" => a.frames = val().parse().unwrap(),
             "--figure" => a.figure = val().clone(),
             "--out" => a.out = Some(val().clone()),
-            "--surge" => a.surge = Some(val().parse().unwrap()),
+            "--run" => a.run = Some(val().parse().unwrap()),
+            "--trigger" => a.trigger = Some(val().clone()),
+            // The moment `N` seconds after Enter.
+            "--surge" => {
+                a.run = Some(val().parse().unwrap());
+                a.trigger = Some("surge".into());
+            }
             other => panic!("unknown argument {other}"),
         }
         i += 2;
@@ -206,8 +216,8 @@ fn main() {
         uni.gbox_p = [pl[0], pl[1], ph[0], ph[1]];
     }
 
-    if let Some(secs) = args.surge {
-        simulate(&fig, &mut uni, secs);
+    if let Some(secs) = args.run {
+        simulate(&fig, &mut uni, secs, args.trigger.as_deref());
     }
 
     let gpu = Gpu::new(&device, &queue, FORMAT, &fig, &uni);
@@ -310,26 +320,43 @@ fn save(
     println!("  wrote {path}");
 }
 
-/// Press Enter and run the effects and the rotation for `secs`, exactly as the viewer
-/// does, then leave that moment in `uni`.
-fn simulate(fig: &Rendered, uni: &mut Uniforms, secs: f32) {
+/// Set off `trigger`, if any, and run the effects and the rotation for `secs` exactly as the
+/// viewer does, then leave that moment in `uni`.
+fn simulate(fig: &Rendered, uni: &mut Uniforms, secs: f32, trigger: Option<&str>) {
     const DT: f32 = 1.0 / 60.0;
-    let loop_secs = fig.loop_secs.max(1e-3);
-    let speeds: Vec<f32> = fig.layers.iter().map(|l| l.turns as f32 / loop_secs).collect();
-    let mut angles = vec![0.0f32; speeds.len()];
     let mut fx = Effects::new(fig);
-    fx.surge();
-    for _ in 0..(secs / DT).round() as usize {
-        fx.advance(DT);
-        for (i, (a, &s)) in angles.iter_mut().zip(&speeds).enumerate() {
-            *a -= fx.spin_rate(i, s) * DT * std::f32::consts::TAU;
+    // With nothing set off, the run is the figure drawing itself in; with something, it
+    // starts from the whole figure, since that is what the effect needs to play over.
+    if trigger.is_some() {
+        fx.skip_build();
+    }
+    match trigger {
+        Some("surge") => fx.surge(),
+        Some("color") => fx.color_wave(),
+        Some("dissolve") => fx.dissolve(),
+        Some("scramble") => fx.scramble(),
+        Some("constellation") => fx.constellation(),
+        Some("typing") | Some("hover") | None => {}
+        Some(other) => panic!(
+            "--trigger takes surge, color, dissolve, scramble, constellation, typing or hover, not {other}"
+        ),
+    }
+    let steps = (secs / DT).round() as usize;
+    for i in 0..steps {
+        let t = i as f32 * DT;
+        match trigger {
+            // A character every 0.15 s.
+            Some("typing") if i % 9 == 0 => fx.key(),
+            // The pointer sweeping an arc across the figure.
+            Some("hover") => {
+                let a = t * 1.3;
+                fx.pointer(Some([fig.center[0] + 260.0 * a.cos(), fig.center[1] + 260.0 * a.sin()]));
+            }
+            _ => {}
         }
+        fx.advance(DT);
     }
-    for (l, &a) in uni.layers.iter_mut().zip(&angles) {
-        let (s, c) = a.sin_cos();
-        l.motion = [a, 0.0, s, c];
-    }
-    fx.write(uni, &angles);
+    fx.write(uni);
     let [jx, jy] = fx.shake();
     uni.fit[1] += jx * uni.fit[0];
     uni.fit[2] += jy * uni.fit[0];

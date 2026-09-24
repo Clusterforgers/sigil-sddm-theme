@@ -61,6 +61,17 @@ effects: {
   lightning:  { every: [0.08, 0.35], lulls: { chance: 0.22, last: [0.7, 1.6] } },
   glyphs:     { every: [1.2, 2.8] },   // a cluster of letters lighting up and lifting off
   surge:      { charge: 1.8, break: 1.4, hold: 1.2, reform: 1.6, stay_broken: false },
+  shimmer:    { strength: 0.6, speed: 0.05 },   // always on: light gliding round the gilt
+  haze:       { strength: 0.8 },                // always on: the ink wavering like heat haze
+  colors:     { every: [6, 11], direction: "both", palette: ["#FF4A1C", "#9B5CFF", "#3FD0FF", "#FFF4E0"] },
+  dissolve:   { every: [8, 14], duration: 3.2 },
+  scramble:   { every: [3, 6], letters: 5, duration: 1.2 },
+  breath:     { strength: 0.22, period: 6 },
+  build:      { duration: 6, on_start: true, after_surge: true },
+  echoes:     { strength: 1 },
+  constellations: { every: [5, 9], stars: 5 },
+  hover:      { strength: 0.8 },
+  typing:     { enabled: true },
 }
 ```
 
@@ -72,8 +83,55 @@ effects: {
   apart and fade over `break`. It stays gone for `hold`, then comes back together over
   `reform`. With `stay_broken: true` it never comes back, which is what a login screen
   wants. Pressing Enter again while it runs does nothing.
-- **Previewing it without a window:** `cargo run --release --bin bench -- --surge 1.9 --out
-  frame.png` renders the moment 1.9 s after Enter.
+- **Shimmer and haze** are always on. `shimmer` is a band of light that sweeps slowly
+  round the figure and stays put while the layers turn under it, so the gilt catches it
+  like real metal leaf. `speed` is in turns per second. `haze` makes the ink waver by up
+  to `strength` canvas units, five times as much while the surge charges. A `strength`
+  of 0 turns either one off.
+- **Colour waves** roll out from the centre every `every` seconds. Each takes a colour
+  from `palette` and recolours the gold ring by ring as it passes. The gold keeps its
+  light and dark, so the lettering stays legible.
+- **Colour direction:** `colors.direction` is `"out"` (from the centre), `"in"` (from the
+  rim, slowing as it gathers at the centre) or `"both"` (picked afresh for each wave).
+- **Dissolve** burns one layer away along a ragged, glowing edge and grows it back over
+  `duration` seconds. The burn pattern turns with the layer.
+- **Scramble** sets a run of up to `letters` neighbouring letters flickering through
+  other letters of the figure for `duration` seconds, then gives the real ones back.
+  Borrowed letters are about the same size as the ones they replace and stand the right
+  way up. The words round the central cross are left alone.
+- **Breath** is always on: the gold swells and dims by up to `strength` (0 to 1) once
+  every `period` seconds, each ring a beat behind the one inside it, so the breath travels
+  outward. `strength: 0` turns it off.
+- **Build** draws the figure in over `duration` seconds. The lines are traced by a glowing
+  pen, from the core outward, and the letters and symbols flash into place in a sweep
+  round the figure. It runs at start (`on_start`), and redraws the figure as it reforms
+  after the surge (`after_surge`). Other effects hold off until the figure is whole.
+- **Echoes** are fading copies trailing a layer that spins fast, so they show during the
+  surge's spin-up and not at the layers' own speeds. `strength: 0` turns them off.
+- **Constellations** link `stars` letters (2 to 8) across different rings with glowing
+  threads and a spark running along each, following the letters as the rings turn.
+- **Hover:** ripples spread from the pointer as it moves, and letters near it glow.
+  `strength: 0` turns it off.
+- **Typing:** each character typed lights another letter of the ring with the most
+  letters, stepping about a twelfth of the way round each time. Backspace puts the last
+  one out, and the surge's explosion clears them all.
+- **Keys in the viewer:** every printable key is typing, as on a login screen. Enter sets
+  off the surge, and the rest of the keys are:
+
+  | key | does |
+  |---|---|
+  | F2 | colour wave |
+  | F3 | dissolve |
+  | F4 | scramble |
+  | F5 | constellation |
+  | F6 | colour each layer |
+  | F7 / F8 | supersampling down / up |
+  | F9 | bloom every layer |
+- **Previewing without a window:** `cargo run --release --bin bench -- --run 1.8
+  --trigger color --out frame.png` renders 1.8 s after setting off a colour wave.
+  `--trigger` sets off `surge`, `color`, `dissolve`, `scramble` or `constellation` at the
+  start, or keeps up `typing` or `hover` through the run, starting from the whole figure.
+  Leave it out to watch the figure draw itself in. `--surge 1.9` is short for `--run 1.9 --trigger surge`.
 - **Live editing:** in the viewer, saving the file restarts every schedule, so a shorter
   wait takes effect at once.
 
@@ -96,7 +154,7 @@ A **track** is a closed curve around the centre that text and spokes follow:
 | `spokes` | radial lines between two tracks | `count`, `from`, `to`, `rotate?`, `width?` |
 | `text` | a ring of words along a track | `items`, `along`, `size`, `rotate?`, `offset?`, `line_gap?`, `flank?`, `orient?` |
 | `label` | one piece of text, placed by hand | `text`, `size`, `at` |
-| `symbols` | a ring of symbols | `symbol`, `count`, `size`, `r` or `fit`, `rotate?` |
+| `symbols` | a ring of symbols | `symbol`, `count`, `size`, `r` or `along` or `fit`, `rotate?`, `offset?`, `run?` |
 | `symbol` | one symbol | `symbol`, `size`, `at?`, `rotate?` |
 
 ```json5
@@ -137,15 +195,38 @@ Each item gets one evenly spaced slot:
 
 ### `symbols` and `symbol`
 
-The symbols are `cross` (a filled cross pattée) and `latin-cross` (stroked). Each one stands
-upright to the centre.
+The symbols:
+
+| name | looks like |
+|---|---|
+| `cross-potent` | ☩, straight arms each ending in a crossbar (the plate's own cross) |
+| `cross` | a cross pattée, with arms flaring along concave curves |
+| `latin-cross` | a plain Latin cross |
+| `orb` | a ringed orb with a cross on top |
+| `tower` | two posts joined by three rungs, crowned with a small cross |
+
+Each symbol stands upright to the centre. The same names work inside text as
+`"{cross-potent}"`, `"{orb}"` and so on.
+
+A `symbols` ring sits in one of three ways:
 
 ```json5
-{ type: "symbols", symbol: "cross", count: 7, r: 236.9, size: 17 }
-// Hang from a circle and shrink each one to fit the space above a track:
-{ type: "symbols", symbol: "cross", count: 7, size: 17, rotate: 6.2,
-  fit: { roof: 352, floor: { polygon: { sides: 7, r: 352.5 } } } }
-{ type: "symbol", symbol: "latin-cross", size: 26 }
+// on a circle
+{ type: "symbols", symbol: "cross-potent", count: 7, r: 236.9, size: 24 }
+// along a track, lifted `offset` off it
+{ type: "symbols", symbol: "cross-potent", count: 7, size: 10,
+  along: { polygon: { sides: 7, r: 153.5, rotate: 25.71 } }, offset: 6.5 }
+// hung from a circle and shrunk to fit the lens above a track
+{ type: "symbols", symbol: "cross-potent", count: 7, size: 17, rotate: 6.2,
+  fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } }
+```
+
+`run: { count: 6, step: 5.45 }` turns each of the `count` places into a short run of
+symbols `step` degrees apart, centred on the place. The rows of crosses round each corner
+of a heptagon use it.
+
+```json5
+{ type: "symbol", symbol: "latin-cross", size: 26 }   // one symbol, `at` offset from the centre
 ```
 
 ## When something is wrong

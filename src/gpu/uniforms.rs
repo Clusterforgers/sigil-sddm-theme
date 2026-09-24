@@ -19,6 +19,21 @@ pub const MAX_GLYPHS: usize = 32;
 /// lightning at once than the wandering strikes ever produce.
 pub const MAX_BOLT_SEGS: usize = 96;
 
+/// Colour waves that can be rolling out at once.
+pub const MAX_WAVES: usize = 4;
+
+/// Letters that can be scrambling at once.
+pub const MAX_SWAPS: usize = 12;
+
+/// Constellation threads, across every live constellation, that can be drawn at once.
+pub const MAX_THREADS: usize = 16;
+
+/// Ripples from the pointer that can be spreading at once.
+pub const MAX_RIPPLES: usize = 8;
+
+/// Letters that typing can have lit at once.
+pub const MAX_MARKS: usize = 24;
+
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
 pub struct GpuLayer {
@@ -27,8 +42,9 @@ pub struct GpuLayer {
     /// (nearest ink, furthest ink, unused, unused) from the centre; outside it the layer
     /// is skipped without sampling.
     pub extent: [f32; 4],
-    /// (scale, opacity, unused, unused): how the layer is drawn right now. (1, 1) at rest;
-    /// the surge flings layers outward and fades them.
+    /// (scale, opacity, dissolve, echo lag): how the layer is drawn right now. (1, 1, 0, 0)
+    /// at rest; the surge flings layers outward and fades them, a dissolve burns them away,
+    /// and a fast spin leaves echoes trailing this many radians behind.
     pub form: [f32; 4],
 }
 
@@ -57,6 +73,56 @@ pub struct GpuLimb {
     pub seg: [f32; 4],
     /// (strength, half-width, unused, unused)
     pub style: [f32; 4],
+}
+
+/// A wave of colour rolling out from the centre.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
+pub struct GpuWave {
+    /// (front radius, width, strength, direction: 1 outward, -1 inward), in canvas units
+    pub front: [f32; 4],
+    /// (r, g, b, unused) in linear light
+    pub color: [f32; 4],
+}
+
+/// A letter drawn in another letter's place while it scrambles.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
+pub struct GpuSwap {
+    /// (x, y, radius, layer) of the letter being replaced, where it sits in its layer
+    pub slot: [f32; 4],
+    /// (x, y, layer, strength) of the letter drawn instead
+    pub source: [f32; 4],
+    /// (cos, sin, scale, unused): how to turn and scale a point round the slot onto the
+    /// same point round the source
+    pub map: [f32; 4],
+}
+
+/// One thread of a constellation, in un-rotated canvas units.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
+pub struct GpuThread {
+    /// (x0, y0, x1, y1)
+    pub seg: [f32; 4],
+    /// (strength, where along it the spark is 0..1, unused, unused)
+    pub style: [f32; 4],
+}
+
+/// A ripple spreading from where the pointer passed: (x, y, radius, strength).
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
+pub struct GpuRipple {
+    pub at: [f32; 4],
+}
+
+/// A letter lit by typing.
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, Default)]
+pub struct GpuMark {
+    /// (x, y, radius, layer) where it sits in its layer
+    pub slot: [f32; 4],
+    /// (steady glow, flash of lighting up, x, y on screen, un-rotated)
+    pub glow: [f32; 4],
 }
 
 /// A glyph that has been lit and is lifting off the plate.
@@ -92,8 +158,17 @@ pub struct Uniforms {
     pub quality: [f32; 4],
     /// (live pulses, live flares, live limbs, live glyphs)
     pub live: [f32; 4],
-    /// (collapse flash, layer-tint strength, explosion flash, unused)
+    /// (collapse flash, layer-tint strength, explosion flash, seconds since start)
     pub look: [f32; 4],
+    /// (shimmer strength, shimmer revolutions per second, haze in canvas units, live waves)
+    pub ambient: [f32; 4],
+    /// (live swaps, breath strength, breath period in seconds, build progress: 0 is nothing
+    /// drawn yet, 1 or more is the whole figure)
+    pub rhythm: [f32; 4],
+    /// (live threads, live ripples, live marks, echo strength)
+    pub live2: [f32; 4],
+    /// (x, y, presence 0..1, unused): the pointer, in un-rotated canvas units
+    pub pointer: [f32; 4],
     /// (min x, min y, max x, max y) around the lit glyphs where they sit in the artwork,
     /// for skipping the pass that hides them.
     pub gbox: [f32; 4],
@@ -105,6 +180,11 @@ pub struct Uniforms {
     pub flares: [GpuFlare; MAX_FLARES],
     pub limbs: [GpuLimb; MAX_BOLT_SEGS],
     pub glyphs: [GpuGlyph; MAX_GLYPHS],
+    pub waves: [GpuWave; MAX_WAVES],
+    pub swaps: [GpuSwap; MAX_SWAPS],
+    pub threads: [GpuThread; MAX_THREADS],
+    pub ripples: [GpuRipple; MAX_RIPPLES],
+    pub marks: [GpuMark; MAX_MARKS],
     pub layers: [GpuLayer; MAX_LAYERS],
 }
 
@@ -118,6 +198,8 @@ pub fn uniforms(fig: &Rendered, ss: u32) -> Uniforms {
     uni.center = fig.center;
     uni.frame = [fig.frame.origin[0], fig.frame.origin[1], fig.frame.side, 0.0];
     uni.fit = [1.0, 0.0, 0.0, fig.layers.len() as f32];
+    // Fully built until someone says otherwise: nothing here is drawing itself in.
+    uni.rhythm[3] = 1.0;
     // Nothing is drawn past the outermost ink, so the shader can stop there.
     uni.quality = [ss as f32, fig.disc(), (glow_levels(px, px) - 1) as f32, 0.0];
     // The textures are sRGB, so linearise the background to match what they decode to.
@@ -162,6 +244,11 @@ mod tests {
         assert_eq!(declared("MAX_FLARES"), MAX_FLARES, "MAX_FLARES");
         assert_eq!(declared("MAX_BOLT_SEGS"), MAX_BOLT_SEGS, "MAX_BOLT_SEGS");
         assert_eq!(declared("MAX_GLYPHS"), MAX_GLYPHS, "MAX_GLYPHS");
+        assert_eq!(declared("MAX_WAVES"), MAX_WAVES, "MAX_WAVES");
+        assert_eq!(declared("MAX_SWAPS"), MAX_SWAPS, "MAX_SWAPS");
+        assert_eq!(declared("MAX_THREADS"), MAX_THREADS, "MAX_THREADS");
+        assert_eq!(declared("MAX_RIPPLES"), MAX_RIPPLES, "MAX_RIPPLES");
+        assert_eq!(declared("MAX_MARKS"), MAX_MARKS, "MAX_MARKS");
     }
 
     /// Every piece of WGSL is valid on its own terms once assembled, and the uniform block

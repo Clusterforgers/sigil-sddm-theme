@@ -100,6 +100,11 @@ impl Surge {
         (self.t / length.max(1e-3)).min(1.0)
     }
 
+    /// How far through coming back together it is, 0 to 1, while it is.
+    pub fn reforming(&self, timing: &SurgeTiming) -> Option<f32> {
+        (self.phase == Phase::Reform).then(|| self.u(timing))
+    }
+
     /// How far the charge has built, 0 to 1. Rises slowly and then fast, so it reads as
     /// something running away rather than a fader being pushed.
     pub fn charge(&self, timing: &SurgeTiming) -> f32 {

@@ -28,6 +28,33 @@
     // explodes, and flies apart over `break`. It stays gone for `hold`, then comes back
     // over `reform` — or never, with `stay_broken: true` (for the login screen).
     surge: { charge: 1.0, break: 1.8, hold: 1.2, reform: 1.6, stay_broken: false },
+
+    // Always on: a band of light gliding round the gilt (`speed` in turns per second),
+    // and the ink wavering like heat haze (`strength` in canvas units). 0 turns one off.
+    shimmer:  { strength: 0.6, speed: 0.05 },
+    haze:     { strength: 0.8 },
+    // A wave of colour recolouring the gold as it passes, each in a colour from the
+    // palette. `direction`: "out" from the centre, "in" from the rim, or "both".
+    colors:   { every: [6, 11], direction: "both", palette: ["#FF4A1C", "#9B5CFF", "#3FD0FF", "#FFF4E0"] },
+    // A layer burning away to embers and growing back, over `duration` seconds.
+    dissolve: { every: [8, 14], duration: 3.2 },
+    // A run of up to `letters` neighbouring letters flickering through other letters of
+    // the figure for `duration` seconds, then settling back.
+    scramble: { every: [3, 6], letters: 5, duration: 1.2 },
+    // Always on: the gold swelling and dimming by `strength`, one breath every `period`
+    // seconds, each ring a beat behind the one inside it.
+    breath:   { strength: 0.22, period: 6 },
+    // The figure drawing itself in: lines traced by a glowing pen, letters flashing into
+    // place, over `duration` seconds, at start and when it reforms after the surge.
+    build:    { duration: 6, on_start: true, after_surge: true },
+    // Fading copies trailing a layer that spins fast, as in the surge; 0 turns them off.
+    echoes:   { strength: 1 },
+    // Glowing threads linking `stars` letters across the rings.
+    constellations: { every: [5, 9], stars: 5 },
+    // Ripples following the pointer, and letters near it glowing; 0 turns it off.
+    hover:    { strength: 0.8 },
+    // Each character typed lights another letter; Backspace puts it out, Enter sends it.
+    typing:   { enabled: true },
   },
 
   // `turns` are whole revolutions per loop, positive clockwise. Stacking: a higher `z`
@@ -91,14 +118,18 @@
             "h", "d", "m", "h", "i", "a", "t",
             "k", "k", "a", "a", "e", "e", "e",
             "i", "i", "e", "e", "l", "l", "l",
-            "e", "e", "l", "l", "M", "G", "{cross}",
+            "e", "e", "l", "l", "M", "G", "{cross-potent}",
           ],
         },
-        // Crosses tucked into the lens between the circle and the heptagon inside it,
-        // three per edge, each shrunk to fit.
-        { type: "symbols", symbol: "cross", count: 7, rotate: 6.2,   size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
-        { type: "symbols", symbol: "cross", count: 7, rotate: 25.71, size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
-        { type: "symbols", symbol: "cross", count: 7, rotate: 45.2,  size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
+        // The lens between the circle and the heptagon inside it: a cross towards each end,
+        // shrunk to fit where it narrows...
+        { type: "symbols", symbol: "cross-potent", count: 7, rotate: 6.2,  size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
+        { type: "symbols", symbol: "cross-potent", count: 7, rotate: 45.2, size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
+        // ...and a sigil in the middle of each, clockwise from the edge at north-north-east.
+        {
+          type: "text", along: { circle: 361.5 }, size: 24, rotate: 25.71, line_gap: 17,
+          items: ["{orb}", "{tower}", "L", "XE", ["{cross-potent}", "L"], "Af", ["{cross-potent}", "G"]],
+        },
       ],
     },
 
@@ -114,9 +145,16 @@
         // The seven names of God, one per edge, reading clockwise from the edge at North.
         {
           type: "text", along: { circle: 262 }, size: 22, rotate: 25.71,
-          items: ["SAAIEMES", "BTZKASE", "HEIDENE", "DEIMOA", "IAMEOGBE", "ILAOVN", "IHRLAA"],
+          items: ["SAAIEMES", "BTZKASE", "HEIDENE", "DEIMO&A", "I&MEOGBE", "ILAOVN", "IHRLAA"],
         },
-        { type: "symbols", symbol: "cross", count: 7, r: 236.9, size: 17, note: "one in each tip of the heptagram" },
+        // Crosses in the spaces the star leaves: one in each tip, and the rest where the
+        // plate has them, measured off it. Each line is a ring of seven.
+        { type: "symbols", symbol: "cross-potent", count: 7, r: 236.9, size: 24, note: "one in each tip of the heptagram" },
+        { type: "symbols", symbol: "cross-potent", count: 7, r: 219,   rotate: 17.5, size: 24 },
+        { type: "symbols", symbol: "cross-potent", count: 7, r: 227.5, rotate: 37.0, size: 24 },
+        { type: "symbols", symbol: "cross-potent", count: 7, r: 246,   rotate: 42.4, size: 24 },
+        { type: "symbols", symbol: "cross-potent", count: 7, r: 257.7, rotate: 6.2,  size: 24 },
+        { type: "symbols", symbol: "cross-potent", count: 7, r: 266.3, rotate: 47.0, size: 24 },
         // Spirit names standing on the two envelopes.
         {
           type: "text", along: { polygon: { sides: 7, r: 217.5, rotate: 25.71 } }, offset: 9.5, size: 13,
@@ -124,8 +162,13 @@
         },
         {
           type: "text", along: { polygon: { sides: 7, r: 186, rotate: 25.71 } }, offset: 9.5, size: 13,
-          flank: { count: 1, size: 11 },
           items: ["I", "Heeon", "Ih", "Beigia", "Ir", "Stimcul", "Dmal"],
+        },
+        // A big cross either side of each corner of that envelope.
+        {
+          type: "symbols", symbol: "cross-potent", count: 7, size: 24, rotate: 23.65,
+          along: { polygon: { sides: 7, r: 186, rotate: 25.71 } }, offset: 14.4,
+          run: { count: 2, step: 29.5 },
         },
       ],
     },
@@ -137,8 +180,15 @@
       elements: [
         {
           type: "text", along: { polygon: { sides: 7, r: 153.5, rotate: 25.71 } }, offset: 11, size: 13,
-          flank: { count: 3, size: 10 },
           items: ["S", "Ab", "Ath", "Ized", "Ekiei", "Madimi", "Esemeli"],
+        },
+        // Six crosses round each corner, between one name and the next. Smaller and lower
+        // than the plate's: round a corner this row reaches up to where the heptagram's
+        // envelope passes as the two turn, and they must stay clear of it.
+        {
+          type: "symbols", symbol: "cross-potent", count: 7, size: 10, rotate: 27.1,
+          along: { polygon: { sides: 7, r: 153.5, rotate: 25.71 } }, offset: 6.5,
+          run: { count: 6, step: 5.45 },
         },
       ],
     },
@@ -152,7 +202,7 @@
         { type: "polygon", sides: 7, r: 121.5, rotate: 25.71 },
         {
           type: "text", along: { polygon: { sides: 7, r: 121.5, rotate: 25.71 } }, offset: 10.5, size: 13,
-          flank: { count: 4, size: 9 },
+          flank: { count: 4, size: 10, symbol: "cross-potent" },
           items: ["E", "An", "Ave", "Liba", "Rocle", "Hagonel", "Ilemese"],
         },
       ],

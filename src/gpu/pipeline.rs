@@ -1,7 +1,7 @@
 use super::pyramid::{glow_pyramid, source_pyramid};
 use super::shader;
 use super::uniforms::Uniforms;
-use crate::figure::Rendered;
+use crate::figure::{LayerImage, Rendered};
 
 use wgpu::util::DeviceExt;
 
@@ -12,21 +12,21 @@ pub struct Gpu {
     pub ubuf: wgpu::Buffer,
 }
 
-/// A 2D array texture with one slice per layer, each slice a full mip chain built by
-/// `chain`, and a view of the whole array.
+/// A 2D array texture with one `side`-square slice per layer, each slice's bytes and mip
+/// level count given by `slice`, and a view of the whole array.
 fn layer_array(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     fig: &Rendered,
     label: &str,
     format: wgpu::TextureFormat,
-    chain: fn(&image::RgbaImage) -> (Vec<u8>, u32),
+    side: u32,
+    slice: impl Fn(&LayerImage) -> (Vec<u8>, u32),
 ) -> wgpu::TextureView {
-    let side = fig.layers[0].image.width();
     let mut data = Vec::new();
     let mut levels = 1;
     for l in &fig.layers {
-        let (bytes, n) = chain(&l.image);
+        let (bytes, n) = slice(l);
         data.extend(bytes);
         levels = n;
     }
@@ -66,10 +66,20 @@ impl Gpu {
     ) -> Self {
         // Every layer as an sRGB texture, prefiltered so it can be minified without the
         // thin lines crawling...
-        let view = layer_array(device, queue, fig, "layers", wgpu::TextureFormat::Rgba8UnormSrgb, source_pyramid);
+        let side = fig.layers[0].image.width();
+        let view = layer_array(device, queue, fig, "layers", wgpu::TextureFormat::Rgba8UnormSrgb, side, |l| {
+            source_pyramid(&l.image)
+        });
         // ...and its pre-blurred highlight for the bloom. Linear, not sRGB: these are
         // already-linear light amounts.
-        let glow_view = layer_array(device, queue, fig, "glow", wgpu::TextureFormat::R8Unorm, glow_pyramid);
+        let glow_view =
+            layer_array(device, queue, fig, "glow", wgpu::TextureFormat::R8Unorm, side, |l| glow_pyramid(&l.image));
+        // When each part of each layer appears as the figure builds itself: two bytes of
+        // one 16-bit moment per texel, read exactly with `textureLoad`, so no mips and no
+        // filtering — blending packed bytes would give nonsense.
+        let reveal_view = layer_array(device, queue, fig, "reveal", wgpu::TextureFormat::Rg8Unorm, fig.layers[0].reveal_side, |l| {
+            (l.reveal.clone(), 1)
+        });
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Linear,
@@ -123,6 +133,7 @@ impl Gpu {
                     count: None,
                 },
                 tex_entry(3),
+                tex_entry(4),
             ],
         });
         let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -141,6 +152,10 @@ impl Gpu {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&glow_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&reveal_view),
                 },
             ],
         });

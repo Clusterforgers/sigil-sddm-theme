@@ -44,6 +44,14 @@ impl Font {
         ch.is_whitespace() || self.face().glyph_index(ch).is_some()
     }
 
+    /// How tall a capital letter stands at `size`, from the font's own metrics — or, for
+    /// a font that does not say, the usual seven tenths of the size.
+    pub fn cap_height(&self, size: f32) -> f32 {
+        let face = self.face();
+        let cap = face.capital_height().filter(|&h| h > 0).map(|h| h as f32);
+        cap.map_or(size * 0.7, |h| h * size / face.units_per_em() as f32)
+    }
+
     /// Width of `s` if it were set at `size` canvas units, before any curving.
     pub fn width(&self, s: &str, size: f32) -> f32 {
         let face = self.face();

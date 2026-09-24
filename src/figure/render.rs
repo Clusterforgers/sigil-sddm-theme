@@ -1,3 +1,4 @@
+use super::build::Reveal;
 use super::pen::{Mark, Style};
 use super::spec::Rgb;
 
@@ -45,6 +46,11 @@ pub struct LayerImage {
     /// The layer on a transparent ground, covering `Rendered::frame`. Premultiplied RGBA,
     /// sRGB-encoded, as tiny-skia leaves it.
     pub image: RgbaImage,
+    /// When each part of the layer appears as the figure builds itself, 0 to 1, as 16 bits
+    /// per pixel in two bytes (high, low), `reveal_side` square — half the image's
+    /// resolution, which is plenty for a moment in time.
+    pub reveal: Vec<u8>,
+    pub reveal_side: u32,
 }
 
 /// A figure drawn and ready to show: one image per layer plus what the viewer needs to
@@ -93,7 +99,7 @@ pub(super) fn extent(marks: &[Mark], c: [f32; 2]) -> [f32; 2] {
 }
 
 /// `path` as straight pieces, each curve cut into eight.
-fn pieces(path: &tiny_skia::Path) -> Vec<((f32, f32), (f32, f32))> {
+pub(super) fn pieces(path: &tiny_skia::Path) -> Vec<((f32, f32), (f32, f32))> {
     use tiny_skia::PathSegment as S;
     const STEPS: usize = 8;
     let mut out = Vec::new();
@@ -209,4 +215,61 @@ pub(super) fn composite(
     // Every pixel is opaque, so premultiplied and straight agree.
     let rgb = pm.pixels().iter().flat_map(|p| [p.red(), p.green(), p.blue()]).collect();
     RgbImage::from_raw(pm.width(), pm.height(), rgb).expect("pixmap size")
+}
+
+/// When each pixel of a layer appears as the figure builds, painted at half `scale`.
+///
+/// Painted without antialiasing, and every mark a little wider than its ink: a blended
+/// edge would carry a blended moment, and the ink's soft fringe would show up early as a
+/// faint outline. Pixels no mark reaches are set to the very end, for the same reason.
+pub(super) fn reveal_map(marks: &[Mark], moments: &[Reveal], frame: Frame, scale: f32) -> (Vec<u8>, u32) {
+    let s = scale * 0.5;
+    let px = (frame.side * s).ceil().max(1.0) as u32;
+    let mut pm = Pixmap::new(px, px).expect("reveal map too large");
+    pm.fill(Color::from_rgba8(255, 255, 0, 255));
+    let xf = Transform::from_scale(s, s).pre_translate(-frame.origin[0], -frame.origin[1]);
+    // Two texels of margin either side, in canvas units.
+    let margin = 4.0 / s;
+
+    let paint_at = |t: f32| {
+        let q = (t.clamp(0.0, 1.0) * 65535.0).round() as u16;
+        let mut p = Paint::default();
+        p.set_color(Color::from_rgba8((q >> 8) as u8, (q & 0xFF) as u8, 0, 255));
+        p.anti_alias = false;
+        p
+    };
+    let stroke = |width: f32| Stroke { width, line_cap: LineCap::Round, ..Stroke::default() };
+
+    for (m, when) in marks.iter().zip(moments) {
+        let ink = match m.style {
+            Style::Stroke(w) => w,
+            Style::Fill => 0.0,
+        };
+        match *when {
+            Reveal::At(t) => {
+                let p = paint_at(t);
+                pm.fill_path(&m.path, &p, FillRule::Winding, xf, None);
+                pm.stroke_path(&m.path, &p, &stroke(ink + margin), xf, None);
+            }
+            Reveal::Along { start, span } => {
+                // Each straight piece gets the moment the pen reaches its middle.
+                let pieces = pieces(&m.path);
+                let total: f32 = pieces.iter().map(|(a, b)| (b.0 - a.0).hypot(b.1 - a.1)).sum::<f32>().max(1e-3);
+                let mut done = 0.0;
+                for (a, b) in pieces {
+                    let len = (b.0 - a.0).hypot(b.1 - a.1);
+                    let mut pb = tiny_skia::PathBuilder::new();
+                    pb.move_to(a.0, a.1);
+                    pb.line_to(b.0, b.1);
+                    if let Some(piece) = pb.finish() {
+                        let p = paint_at(start + span * (done + len * 0.5) / total);
+                        pm.stroke_path(&piece, &p, &stroke(ink + margin), xf, None);
+                    }
+                    done += len;
+                }
+            }
+        }
+    }
+    let bytes = pm.pixels().iter().flat_map(|p| [p.red(), p.green()]).collect();
+    (bytes, px)
 }
