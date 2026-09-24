@@ -1,9 +1,5 @@
-pub mod config;
-pub mod fit;
-pub mod geom;
-pub mod gifout;
-pub mod glyphs;
+pub mod effects;
+pub mod figure;
+pub mod geometric;
 pub mod gpu;
-pub mod render;
-pub mod sigil;
 pub mod text;

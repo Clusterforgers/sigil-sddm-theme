@@ -4,7 +4,6 @@
 devenv.local.nix
 
 # rendered output
-/spin.gif
-/spin.mp4
-/preview.png
-/frames
+/sigil.png
+/layers/
+/glyphs.png

@@ -1,0 +1,15 @@
+pub const SOURCE: &str = concat!(
+    include_str!("../../shaders/common.wgsl"),
+    "\n",
+    include_str!("../../shaders/effects/bloom.wgsl"),
+    "\n",
+    include_str!("../../shaders/effects/pulse.wgsl"),
+    "\n",
+    include_str!("../../shaders/effects/flare.wgsl"),
+    "\n",
+    include_str!("../../shaders/effects/bolt.wgsl"),
+    "\n",
+    include_str!("../../shaders/effects/glyph.wgsl"),
+    "\n",
+    include_str!("../../shaders/spin.wgsl"),
+);

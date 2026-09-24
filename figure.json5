@@ -1,0 +1,190 @@
+// The sigil. See docs/figure.md for every element type and field.
+//
+// Units are canvas units; angles are degrees CLOCKWISE from North (12 o'clock).
+// `rotate: 0` puts a polygon's or star's vertex at North; for a heptagon, 25.71 (= 180/7)
+// puts an edge there instead.
+//
+// Each layer is its own image and turns as one: move an element to another layer by
+// moving its line. `imagespin check` validates this file; `imagespin draw --tint` shows
+// which layer each element landed in; the live viewer reloads it on save.
+{
+  canvas: [2000, 1125],
+  center: [1000, 562.5],
+  background: "#0E0D0C",
+  ink: "#FBB929",
+  line_width: 1.6,
+  loop: { frames: 450, fps: 25 },
+
+  // How often each effect happens on its own, in seconds between one and the next: a
+  // single number, or [min, max] for a fresh random wait each time. `enabled: false`
+  // turns one off. Every line is optional; these are the defaults.
+  effects: {
+    drops:      { every: [3.6, 8.8] },   // blood dropping into the middle
+    implosions: { every: [3.0, 5.0] },     // a ring closing in from the rim, then a burst of lightning
+    lightning:  { every: [0.08, 0.35],   // strikes walking the figure...
+                lulls: { chance: 0.22, last: [0.7, 3.6] } },  // ...with the odd longer pause
+    glyphs:     { every: [0.5, 1.1] },   // a cluster of letters lighting up and lifting off
+  },
+
+  // `turns` are whole revolutions per loop, positive clockwise. Stacking: a higher `z`
+  // draws on top (default 0); equal `z` stacks in the order written here, later on top.
+  layers: [
+    {
+      name: "outer gold ring",
+      turns: 0,
+      z: 10,
+      elements: [
+        { type: "circle", r: 436, width: 13 },
+      ],
+    },
+
+    {
+      name: "character cells",
+      turns: -1,
+      z: 9,
+      elements: [
+        { type: "circle", r: 420 },
+        { type: "spokes", count: 40, from: { circle: 390.5 }, to: { circle: 420 } },
+        // One cell per item, clockwise from the divider at North. Two lines stack, outer
+        // first; a single character sits centred.
+        {
+          type: "text", along: { circle: 399.75 }, size: 12, line_gap: 13.5, rotate: 4.5,
+          items: [
+            ["4", "T"],  ["9", "G"],  ["7", "n"],  ["t", "9"],  ["22", "h"],
+            "n",         ["6", "m"],  ["22", "o"], ["20", "a"], ["4", "n"],
+            ["6", "a"],  "h",         ["18", "o"], ["23", "f"], ["l", "p"],
+            "n",         ["l", "8"],  ["7", "G"],  ["13", "r"], ["H", "D"],
+            "og",        ["y", "15"], ["t", "n"],  ["o", "8"],  ["e", "21"],
+            ["10", "6"], ["11", "A"], ["15", "r"], ["8", "a"],  ["r", "16"],
+            "n",         ["6", "A"],  ["o", "10"], ["s", "G"],  ["h", "14"],
+            ["o", "17"], "s",         ["4", "5"],  ["a", "24"], ["6", "w"],
+          ],
+        },
+      ],
+    },
+
+    {
+      name: "letter ring",
+      turns: 1,
+      z: 8,
+      elements: [
+        { type: "circle", r: 388 },
+        { type: "polygon", sides: 7, r: 388.5 },
+        { type: "polygon", sides: 7, r: 354 },
+        {
+          type: "spokes", count: 49,
+          from: { polygon: { sides: 7, r: 354 } },
+          to: { polygon: { sides: 7, r: 388.5 } },
+        },
+        // Seven to an edge, clockwise from the vertex at North, standing on the inner
+        // heptagon so they rise towards each vertex.
+        {
+          type: "text", along: { polygon: { sides: 7, r: 354 } }, offset: 8, size: 20, rotate: 3.6735,
+          items: [
+            "Z", "l", "l", "R", "H", "i", "a",
+            "a", "Z", "C", "a", "a", "c", "b",
+            "p", "a", "u", "p", "n", "h", "r",
+            "h", "d", "m", "h", "i", "a", "t",
+            "k", "k", "a", "a", "e", "e", "e",
+            "i", "i", "e", "e", "l", "l", "l",
+            "e", "e", "l", "l", "M", "G", "{cross}",
+          ],
+        },
+        // Crosses tucked into the lens between the circle and the heptagon inside it,
+        // three per edge, each shrunk to fit.
+        { type: "symbols", symbol: "cross", count: 7, rotate: 6.2,   size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
+        { type: "symbols", symbol: "cross", count: 7, rotate: 25.71, size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
+        { type: "symbols", symbol: "cross", count: 7, rotate: 45.2,  size: 17, fit: { roof: 388, floor: { polygon: { sides: 7, r: 388.5 } } } },
+      ],
+    },
+
+    {
+      name: "heptagram",
+      turns: 2,
+      z: 7,
+      elements: [
+        { type: "star", points: 7, skip: 2, r: 314, ribbon: 28.2 },
+        // The ribbon's own envelopes, tangent to its inner edges.
+        { type: "polygon", sides: 7, r: 217.5, rotate: 25.71 },
+        { type: "polygon", sides: 7, r: 186, rotate: 25.71 },
+        // The seven names of God, one per edge, reading clockwise from the edge at North.
+        {
+          type: "text", along: { circle: 262 }, size: 22, rotate: 25.71,
+          items: ["SAAIEMES", "BTZKASE", "HEIDENE", "DEIMOA", "IAMEOGBE", "ILAOVN", "IHRLAA"],
+        },
+        { type: "symbols", symbol: "cross", count: 7, r: 236.9, size: 17, note: "one in each tip of the heptagram" },
+        // Spirit names standing on the two envelopes.
+        {
+          type: "text", along: { polygon: { sides: 7, r: 217.5, rotate: 25.71 } }, offset: 9.5, size: 13,
+          items: ["El", "Me", "Ese", "Iana", "Akele", "Azdobn", "Stimcul"],
+        },
+        {
+          type: "text", along: { polygon: { sides: 7, r: 186, rotate: 25.71 } }, offset: 9.5, size: 13,
+          flank: { count: 1, size: 11 },
+          items: ["I", "Heeon", "Ih", "Beigia", "Ir", "Stimcul", "Dmal"],
+        },
+      ],
+    },
+
+    {
+      name: "spirit names",
+      turns: -3,
+      z: 6,
+      elements: [
+        {
+          type: "text", along: { polygon: { sides: 7, r: 153.5, rotate: 25.71 } }, offset: 11, size: 13,
+          flank: { count: 3, size: 10 },
+          items: ["S", "Ab", "Ath", "Ized", "Ekiei", "Madimi", "Esemeli"],
+        },
+      ],
+    },
+
+    {
+      name: "cross band",
+      turns: -3,
+      z: 5,
+      elements: [
+        { type: "polygon", sides: 7, r: 153.5, rotate: 25.71 },
+        { type: "polygon", sides: 7, r: 121.5, rotate: 25.71 },
+        {
+          type: "text", along: { polygon: { sides: 7, r: 121.5, rotate: 25.71 } }, offset: 10.5, size: 13,
+          flank: { count: 4, size: 9 },
+          items: ["E", "An", "Ave", "Liba", "Rocle", "Hagonel", "Ilemese"],
+        },
+      ],
+    },
+
+    {
+      name: "pentagram core",
+      turns: 3,
+      z: 4,
+      elements: [
+        { type: "star", points: 5, skip: 2, r: 107, ribbon: 3.6 },
+        // Seven letters ringing the pentagram, placed by eye.
+        { type: "label", text: "Z", size: 26, at: { r: 74, angle: 342.94 } },
+        { type: "label", text: "A", size: 26, at: { r: 74, angle: 54.22 } },
+        { type: "label", text: "B", size: 26, at: { r: 74, angle: 109.42 } },
+        { type: "label", text: "A", size: 26, at: { r: 74, angle: 160.10 } },
+        { type: "label", text: "L", size: 26, at: { r: 74, angle: 201.07 } },
+        { type: "label", text: "H", size: 26, at: { r: 74, angle: 253.17 } },
+        { type: "label", text: "E", size: 26, at: { r: 74, angle: 305.16 } },
+        // In four of the pentagram's arms; the fifth carries MADIMIEL.
+        { type: "label", text: "Z", size: 15, at: { r: 50, angle: 0.60 } },
+        { type: "label", text: "C", size: 15, at: { r: 51, angle: 288.00 } },
+        { type: "label", text: "Z", size: 15, at: { r: 53, angle: 214.20 } },
+        { type: "label", text: "S", size: 15, at: { r: 53, angle: 142.20 } },
+        // Between the pentagram's points, reading clockwise.
+        {
+          type: "text", along: { circle: 57 }, size: 9, rotate: 324,
+          items: ["ORABIEL", "ZEDEKEL", "MADIMIEL", "SEMELIEL", "OCCAZIEL"],
+        },
+        // Around the cross at the very centre, square to the page.
+        { type: "label", text: "VA", size: 13, at: [0, -18] },
+        { type: "label", text: "LE", size: 13, at: [-20, 2] },
+        { type: "label", text: "NA", size: 13, at: [20, 2] },
+        { type: "label", text: "EL", size: 13, at: [0, 22] },
+        { type: "symbol", symbol: "latin-cross", size: 26 },
+      ],
+    },
+  ],
+}

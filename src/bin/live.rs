@@ -1,11 +1,13 @@
-use imagespin::config;
-use imagespin::sigil;
-use imagespin::geom::Layer;
-use imagespin::gpu::{self, Gpu, Uniforms, MAX_BOLT_SEGS, MAX_FLARES, MAX_GLYPHS, MAX_PULSES};
+use imagespin::effects::{Census, Drop, Effects};
+use imagespin::gpu::{self, Gpu, Uniforms};
+use imagespin::figure::{self, Figure, FigureError, Rendered};
 
 use rand::rngs::SmallRng;
 use rand::RngExt;
 
+use std::path::PathBuf;
+use std::process::ExitCode;
+use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -16,67 +18,6 @@ use winit::event::{ElementState, KeyEvent, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
-
-/// A drop landing in something thick, or the same thing running in reverse.
-///
-/// Carries the splash at the point of impact as well as the ring, because the two are
-/// one event: the crest is what the splash turns into.
-struct Pulse {
-    age: f32,
-    /// Crest radius in source pixels, and how fast it is still travelling.
-    radius: f32,
-    speed: f32,
-    /// Envelope width and ripple wavelength, in source pixels.
-    width: f32,
-    wavelength: f32,
-    strength: f32,
-    /// The impact flash at the centre: how bright it still is, and how wide.
-    splash: f32,
-    splash_radius: f32,
-    /// Converging on the centre rather than leaving it.
-    imploding: bool,
-}
-
-/// What kind of disturbance to start.
-enum Drop {
-    /// The ambient one: something falls in the middle.
-    Droplet,
-    /// What Enter fires — a far heavier drop.
-    Heavy,
-    /// A ring that starts at the rim and closes on the centre, gathering as it goes.
-    Implosion,
-    /// What an implosion turns into when it lands, carrying its gathered strength.
-    Rebound(f32),
-}
-
-/// One straight limb of a bolt, in source pixels.
-struct Limb {
-    a: [f32; 2],
-    b: [f32; 2],
-}
-
-/// A bolt of lightning arcing across the diagram.
-struct Bolt {
-    /// The jagged path, plus any fork, flattened into one list.
-    limbs: Vec<Limb>,
-    age: f32,
-    life: f32,
-    strength: f32,
-    /// Half-width of the hot core, in source pixels.
-    width: f32,
-    /// Flicker phase, so two bolts alight at once do not pulse in step.
-    phase: f32,
-}
-
-/// The afterglow left behind where a bolt struck. Placed in un-rotated coordinates, so
-/// it stays where it landed while the layers keep turning underneath it.
-struct Flare {
-    pos: [f32; 2],
-    radius: f32,
-    age: f32,
-    life: f32,
-    strength: f32,
-}
 
 /// Which mip of the artwork to read, given how the window maps onto it.
 ///
@@ -96,76 +37,6 @@ fn source_lod(fit_scale: f32, ss: u32, canvas_scale: f32) -> f32 {
     (-rate.log2() - 0.35).max(0.0)
 }
 
-/// Smoothstep, for envelopes that must not pop at either end.
-fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
-    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// Crest strength.
-///
-/// A ring spreads a fixed amount of energy over a growing circumference, so amplitude
-/// goes as `1/sqrt(r)` — which is also why an implosion gets brighter the further in it
-/// gets, rather than merely surviving. Viscosity damps the whole thing on top of that,
-/// and the rim fade keeps a wave from ending abruptly against the outer ring.
-fn pulse_amount(p: &Pulse, disc: f32) -> f32 {
-    let r = p.radius.max(disc * 0.06);
-    let spread = (disc * 0.34 / r).sqrt().clamp(0.4, 2.8);
-    let damp = (-1.05 * p.age).exp();
-    p.strength * spread * damp * (1.0 - smoothstep(0.88, 1.10, p.radius / disc))
-}
-
-/// Lightning is a flash that decays fast, with a flicker on top so it reads as
-/// electricity rather than as a line quietly fading out.
-fn bolt_amount(b: &Bolt) -> f32 {
-    let u = (b.age / b.life.max(1e-3)).min(1.0);
-    let decay = (1.0 - u) * (1.0 - u);
-    b.strength * decay * (0.68 + 0.32 * (b.age * 57.0 + b.phase).sin())
-}
-
-/// Strike fast, ebb slowly — a discharge rather than a throb.
-fn flare_amount(f: &Flare) -> f32 {
-    let u = f.age / f.life.max(1e-3);
-    f.strength * smoothstep(0.0, 0.12, u) * (1.0 - smoothstep(0.25, 1.0, u))
-}
-
-
-/// A glyph that has been activated: lit, and drifting off the plate.
-struct Lit {
-    /// Where it sits in the artwork, un-rotated, and how far it reaches.
-    pos: [f32; 2],
-    half: [f32; 2],
-    /// The layer carrying it. The copy has to travel with that layer as it turns, or it
-    /// drifts away from the glyph it came out of.
-    layer: usize,
-    age: f32,
-    /// How long it waits before it starts, so a group ripples.
-    delay: f32,
-    life: f32,
-    /// How far out it drifts over its whole life, in source pixels.
-    travel: f32,
-    strength: f32,
-}
-
-/// How far through its own life a glyph is, counting from the end of its wait.
-fn lit_progress(l: &Lit) -> f32 {
-    ((l.age - l.delay) / l.life.max(1e-3)).clamp(0.0, 1.0)
-}
-
-/// Drifts out under its own momentum and settles, rather than travelling at a constant
-/// rate — which would read as being dragged.
-fn lit_travel(l: &Lit) -> f32 {
-    let u = lit_progress(l);
-    l.travel * (1.0 - (1.0 - u) * (1.0 - u))
-}
-
-/// How strongly the risen copy shows. It has to be gone by the time the glyph has
-/// finished travelling, or it just sits there as a second, brighter glyph.
-fn lit_ghost(l: &Lit) -> f32 {
-    let u = lit_progress(l);
-    l.strength * smoothstep(0.02, 0.22, u) * (1.0 - smoothstep(0.6, 1.0, u))
-}
-
 /// The worst frame seen in a reporting interval, and what was on screen for it.
 ///
 /// A vsync-locked viewer cannot be timed by asking the GPU politely — every frame appears
@@ -175,513 +46,74 @@ fn lit_ghost(l: &Lit) -> f32 {
 #[derive(Default, Clone, Copy)]
 struct Worst {
     dt: f32,
-    pulses: usize,
-    limbs: usize,
-    flares: usize,
-    glyphs: usize,
-    bloom: f32,
+    live: Census,
 }
 
-/// Bolts an implosion throws out of the centre when it lands.
-const BURST_BOLTS: u32 = 9;
-
-/// Bolts that can be in the air together. Has to clear a whole burst, or the fan would
-/// evict its own first arms before the last ones were out.
-const MAX_BOLTS: usize = 14;
-
-/// Seconds for a bloom to fade to ~2% of its peak.
-const BLOOM_DECAY: f32 = 0.55;
-
+/// How the layers turn, and how the viewer is set to draw them.
 struct State {
-    /// Revolutions per second, signed, fixed for the whole session.
+    /// Revolutions per second, positive clockwise, from each layer's `turns`.
     speed: Vec<f32>,
+    /// Each layer's current turn: radians, counter-clockwise, as the shader wants it.
     angle: Vec<f32>,
-    /// Per-layer glow, 1.0 on a keypress, decaying toward 0.
-    bloom: Vec<f32>,
     /// Names of the layers.
     names: Vec<String>,
     /// Supersampling factor, 1-4.
     ss: u32,
     /// Paint each layer in its own colour, for telling which ring turns with which.
     tint: bool,
-    /// Picks the layer an unassigned key blooms, and everything the energy does.
+    /// Picks the layer an unassigned key blooms.
     rng: SmallRng,
-    /// Rings travelling out from the centre, oldest first.
-    pulses: Vec<Pulse>,
-    /// Lightning currently in the air.
-    bolts: Vec<Bolt>,
-    /// Afterglows where lightning struck.
-    flares: Vec<Flare>,
-    /// Seconds until the next ambient pulse and the next strike.
-    next_pulse: f32,
-    next_bolt: f32,
-    /// Where the last bolt landed. The next one leaves from here, so the lightning
-    /// walks the diagram instead of teleporting around it.
-    spark_at: [f32; 2],
-    /// The fan an implosion left to release: how many arms are still to come, when the
-    /// next one is due, how hard they hit, and the angle the fan is built around.
-    burst_left: u32,
-    burst_timer: f32,
-    burst_power: f32,
-    burst_base: f32,
-    /// How brightly the whole disc is still answering the last collapse.
-    flash: f32,
-    /// The layer regions, so a newly lit glyph can be told which one carries it.
-    layers: Vec<Layer>,
-    /// Every letter and symbol found in the artwork, and the few currently activated.
-    catalogue: Vec<imagespin::glyphs::Glyph>,
-    lit: Vec<Lit>,
-    next_lit: f32,
-    /// Disc centre and outermost radius, in source pixels.
-    center: [f32; 2],
-    disc: f32,
 }
 
 impl State {
     /// The colours `t` paints the layers in, in the same order as `describe`. Matches
-    /// `LAYER_TINT` in `render.rs` and `layer_tint` in `spin.wgsl`, all three by hand.
+    /// `layer_tint` in `common.wgsl`, by hand.
     fn legend(&self) {
         const NAMES: [&str; 7] =
             ["red", "orange", "yellow", "green", "cyan", "blue", "magenta"];
         println!("\n  layer colours on — each ring is painted by the layer that turns it");
         for (i, name) in self.names.iter().enumerate() {
-            let s = self.speed[i];
-            let way = if s.abs() < 1e-4 {
-                "static".to_string()
-            } else {
-                format!("{:.1}s/rev {}", 1.0 / s.abs(), if s > 0.0 { "CCW" } else { "CW" })
-            };
             println!(
                 "    {}  {:<9}  {:<18}  {}",
                 i + 1,
                 NAMES[i.min(NAMES.len() - 1)],
                 name,
-                way
+                self.period(i)
             );
         }
-        println!("  edit `turns` in layers.json and restart to change any of them\n");
+        println!("  edit `turns` in the figure file; saving it updates the viewer\n");
     }
 
     fn describe(&self) {
-        println!("\n  layers (speeds are fixed; edit layers.json to change them)");
+        println!("\n  layers (edit the figure file to change them; saves are picked up live)");
         for (i, name) in self.names.iter().enumerate() {
-            let s = self.speed[i];
-            let period = if s.abs() < 1e-4 {
-                "static".to_string()
-            } else {
-                // Positive is counter-clockwise: both renderers sample at `alpha - theta`,
-                // and `alpha` is measured counter-clockwise from North.
-                let way = if s > 0.0 { "CCW" } else { "CW" };
-                format!("{:.1}s/rev {way}", 1.0 / s.abs())
-            };
-            println!("    {}  {:<18}  {:>6.3} rev/s   {}", i + 1, name, s, period);
+            println!("    {}  {:<18}  {:>6.3} rev/s   {}", i + 1, name, self.speed[i], self.period(i));
         }
         println!("\n  press any key to bloom a random layer — 1-{} pick one, Space blooms all",
             self.names.len().min(9));
     }
 
-    /// Light up layer `i`.
-    fn flash(&mut self, i: usize) {
-        if let Some(b) = self.bloom.get_mut(i) {
-            *b = 1.0;
-        }
-    }
-
-
-    /// Start a disturbance. The four kinds differ only in how hard they hit and which
-    /// way the ring runs.
-    fn add_pulse(&mut self, drop: Drop) {
-        if self.pulses.len() >= MAX_PULSES {
-            self.pulses.remove(0);
-        }
-        let d = self.disc;
-        let base = Pulse {
-            age: 0.0,
-            radius: 0.0,
-            speed: d * 0.92,
-            width: d * 0.09,
-            wavelength: d * 0.21,
-            strength: 0.95,
-            splash: 1.2,
-            splash_radius: d * 0.16,
-            imploding: false,
-        };
-        self.pulses.push(match drop {
-            Drop::Droplet => base,
-            Drop::Heavy => Pulse {
-                speed: d * 0.72,
-                width: d * 0.16,
-                wavelength: d * 0.30,
-                strength: 1.8,
-                splash: 2.4,
-                splash_radius: d * 0.28,
-                ..base
-            },
-            // Starts at the rim with nothing at the centre: there has been no impact
-            // yet, and the whole point is that it is on its way to one.
-            Drop::Implosion => Pulse {
-                radius: d * 1.02,
-                speed: d * 0.45,
-                width: d * 0.10,
-                wavelength: d * 0.22,
-                strength: 0.85,
-                splash: 0.0,
-                imploding: true,
-                ..base
-            },
-            // Everything the implosion gathered, coming back out.
-            Drop::Rebound(gathered) => Pulse {
-                speed: d * 1.10,
-                width: d * 0.14,
-                wavelength: d * 0.24,
-                strength: gathered * 2.1,
-                splash: gathered * 3.4,
-                splash_radius: d * 0.24,
-                ..base
-            },
-        });
-    }
-
-    /// Pull a point back inside the disc, so a bolt and its halo never cross the rim.
-    fn inside_disc(&self, p: [f32; 2], frac: f32) -> [f32; 2] {
-        let (dx, dy) = (p[0] - self.center[0], p[1] - self.center[1]);
-        let r = (dx * dx + dy * dy).sqrt();
-        let max = self.disc * frac;
-        if r <= max || r < 1e-3 {
-            p
+    /// Seconds per revolution and which way.
+    fn period(&self, i: usize) -> String {
+        let s = self.speed[i];
+        if s.abs() < 1e-4 {
+            "static".to_string()
         } else {
-            [self.center[0] + dx * max / r, self.center[1] + dy * max / r]
+            format!("{:.1}s/rev {}", 1.0 / s.abs(), if s > 0.0 { "CW" } else { "CCW" })
         }
     }
 
-    /// A jagged path from `a` to `b`.
-    fn jag(&mut self, a: [f32; 2], b: [f32; 2], steps: usize, spread: f32) -> Vec<Limb> {
-        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-        let len = (dx * dx + dy * dy).sqrt().max(1.0);
-        // Unit normal to the run: the direction the kinks push in.
-        let (nx, ny) = (-dy / len, dx / len);
-        let mut pts = Vec::with_capacity(steps + 1);
-        for i in 0..=steps {
-            let t = i as f32 / steps as f32;
-            // sin is zero at both ends and one in the middle — taut, not frayed.
-            let taper = (t * std::f32::consts::PI).sin();
-            let off: f32 = self.rng.random_range(-1.0..1.0) * spread * len * taper;
-            pts.push([a[0] + dx * t + nx * off, a[1] + dy * t + ny * off]);
-        }
-        pts.windows(2).map(|w| Limb { a: w[0], b: w[1] }).collect()
-    }
-
-    /// Strike from wherever the last bolt landed to somewhere new.
-    fn add_bolt(&mut self) {
-        if self.bolts.len() >= MAX_BOLTS {
-            self.bolts.remove(0);
-        }
-        let d = self.disc;
-        let long = self.rng.random_range(0.0..1.0) < 0.22;
-        let reach = if long {
-            d * self.rng.random_range(0.75..1.55)
-        } else {
-            d * self.rng.random_range(0.22..0.62)
-        };
-        let dir: f32 = self.rng.random_range(0.0..std::f32::consts::TAU);
-        let from = self.spark_at;
-        let to = self.inside_disc(
-            [from[0] + reach * dir.cos(), from[1] + reach * dir.sin()],
-            0.90,
-        );
-
-        let steps = if long { 9 } else { 6 };
-        let mut limbs = self.jag(from, to, steps, 0.085);
-
-        // A fork now and then. It costs three limbs and does more for the look than
-        // anything else here.
-        if limbs.len() > 2 && self.rng.random_range(0.0..1.0) < 0.45 {
-            let at = self.rng.random_range(1..limbs.len() - 1);
-            let root = limbs[at].a;
-            let ang: f32 = self.rng.random_range(0.0..std::f32::consts::TAU);
-            let flen = reach * self.rng.random_range(0.20..0.45);
-            let tip =
-                self.inside_disc([root[0] + flen * ang.cos(), root[1] + flen * ang.sin()], 0.90);
-            let fork = self.jag(root, tip, 3, 0.11);
-            limbs.extend(fork);
-        }
-
-        self.bolts.push(Bolt {
-            limbs,
-            age: 0.0,
-            life: self.rng.random_range(0.18..0.38),
-            strength: if long {
-                self.rng.random_range(1.10..1.60)
-            } else {
-                self.rng.random_range(0.75..1.15)
-            },
-            width: self.rng.random_range(2.6..4.0),
-            phase: self.rng.random_range(0.0..std::f32::consts::TAU),
-        });
-
-        // Something has to light up where it landed, or the strike has no consequence.
-        if self.flares.len() >= MAX_FLARES {
-            self.flares.remove(0);
-        }
-        self.flares.push(Flare {
-            pos: to,
-            radius: self.rng.random_range(40.0..85.0),
-            age: 0.0,
-            life: self.rng.random_range(0.35..0.70),
-            strength: self.rng.random_range(0.5..0.9),
-        });
-
-        self.spark_at = to;
-    }
-
-
-    /// One arm of the fan an implosion throws out when it lands.
-    fn add_burst_bolt(&mut self, angle: f32, power: f32) {
-        if self.bolts.len() >= MAX_BOLTS {
-            self.bolts.remove(0);
-        }
-        let d = self.disc;
-        let from = self.center;
-        let reach = d * self.rng.random_range(0.72..0.95);
-        let to = self.inside_disc(
-            [from[0] + reach * angle.cos(), from[1] + reach * angle.sin()],
-            0.92,
-        );
-
-        // Taut and nearly straight: this is energy thrown outward, not something picking
-        // its way across the diagram.
-        let mut limbs = self.jag(from, to, 6, 0.055);
-        if limbs.len() > 2 && self.rng.random_range(0.0..1.0) < 0.18 {
-            let at = self.rng.random_range(1..limbs.len() - 1);
-            let root = limbs[at].a;
-            let ang: f32 = angle + self.rng.random_range(-1.1..1.1);
-            let flen = reach * self.rng.random_range(0.18..0.38);
-            let tip =
-                self.inside_disc([root[0] + flen * ang.cos(), root[1] + flen * ang.sin()], 0.92);
-            let fork = self.jag(root, tip, 3, 0.09);
-            limbs.extend(fork);
-        }
-
-        self.bolts.push(Bolt {
-            limbs,
-            age: 0.0,
-            // Shorter than a wandering strike: this is a flash, and it also keeps the
-            // number alight at once — and so the cost — down.
-            life: self.rng.random_range(0.12..0.24),
-            strength: power * self.rng.random_range(1.2..1.8),
-            width: self.rng.random_range(2.8..4.2),
-            phase: self.rng.random_range(0.0..std::f32::consts::TAU),
-        });
-
-        if self.flares.len() >= MAX_FLARES {
-            self.flares.remove(0);
-        }
-        self.flares.push(Flare {
-            pos: to,
-            radius: self.rng.random_range(40.0..80.0),
-            age: 0.0,
-            life: self.rng.random_range(0.3..0.6),
-            strength: power * self.rng.random_range(0.5..0.9),
-        });
-    }
-
-
-    /// Which layer carries a point of the artwork.
-    ///
-    /// The same first-hit-wins walk the renderer does, on the un-rotated position, because
-    /// that is the frame the artwork and the layer regions are both written in.
-    fn owning_layer(&self, pos: [f32; 2]) -> usize {
-        let (dx, dy) = (pos[0] - self.center[0], pos[1] - self.center[1]);
-        let r = (dx * dx + dy * dy).sqrt();
-        let alpha = (-dx).atan2(-dy);
-        self.layers.iter().position(|l| l.contains(r, alpha)).unwrap_or(0)
-    }
-
-    /// Activate a cluster of glyphs.
-    ///
-    /// A seed is picked from the catalogue and its nearest neighbours go with it, each held
-    /// back a little longer than the last, so the group ripples outward from the seed rather
-    /// than snapping on together. One glyph alone reads as a flicker; a cluster reads as a
-    /// passage being called.
-    fn add_lit(&mut self) {
-        if self.catalogue.is_empty() {
-            return;
-        }
-        let seed = self.catalogue[self.rng.random_range(0..self.catalogue.len())];
-        let want = self.rng.random_range(3..9).min(MAX_GLYPHS);
-
-        // Nearest first. 279 glyphs, so sorting the lot costs nothing worth avoiding.
-        let mut near: Vec<(f32, usize)> = self
-            .catalogue
+    /// Take on the layers of `fig`. A layer that was there before, by name, carries on
+    /// from the angle it had reached, so saving an edit does not make everything jump.
+    fn adopt(&mut self, fig: &Rendered) {
+        let loop_secs = fig.loop_secs.max(1e-3);
+        self.angle = fig
+            .layers
             .iter()
-            .enumerate()
-            .map(|(i, g)| {
-                let (dx, dy) = (g.pos[0] - seed.pos[0], g.pos[1] - seed.pos[1]);
-                (dx * dx + dy * dy, i)
-            })
+            .map(|l| self.names.iter().position(|n| *n == l.name).map_or(0.0, |i| self.angle[i]))
             .collect();
-        near.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-
-        for (rank, &(_, idx)) in near.iter().take(want).enumerate() {
-            if self.lit.len() >= MAX_GLYPHS {
-                self.lit.remove(0);
-            }
-            let g = self.catalogue[idx];
-            // A little past the ink, so the glow is not cropped to the letter.
-            let pad = 3.0;
-            let layer = self.owning_layer(g.pos);
-            self.lit.push(Lit {
-                pos: g.pos,
-                half: [g.radius + pad, g.radius + pad],
-                layer,
-                age: 0.0,
-                // Each one waits on the one before it, with a little scatter so the
-                // ripple does not look mechanical.
-                delay: rank as f32 * self.rng.random_range(0.03..0.09),
-                life: self.rng.random_range(1.3..2.4),
-                travel: self.rng.random_range(10.0..22.0),
-                strength: self.rng.random_range(0.75..1.25),
-            });
-        }
-    }
-
-    /// Age the activated glyphs, drop the spent ones, and light another when due.
-    fn advance_lit(&mut self, dt: f32) {
-        for l in self.lit.iter_mut() {
-            l.age += dt;
-        }
-        self.lit.retain(|l| l.age < l.delay + l.life);
-
-        self.next_lit -= dt;
-        if self.next_lit <= 0.0 {
-            self.add_lit();
-            // A group is already several glyphs, so leave a gap before the next one. Back
-            // to back they overlap into a permanent wash, which costs more and reads as
-            // less: the pause is what makes each one an event.
-            self.next_lit = self.rng.random_range(1.2..2.8);
-        }
-    }
-
-    /// Release the fan a bolt at a time.
-    ///
-    /// Spread over a fifth of a second rather than fired at once, which reads as energy
-    /// rushing out instead of a single flash — and caps how many bolts are alight
-    /// together, which is what keeps the cost spike in hand.
-    fn advance_burst(&mut self, dt: f32) {
-        if self.burst_left == 0 {
-            return;
-        }
-        self.burst_timer -= dt;
-        while self.burst_left > 0 && self.burst_timer <= 0.0 {
-            let i = (BURST_BOLTS - self.burst_left) as f32;
-            // Evenly spaced so it is a fan, jittered so it is not a diagram.
-            let spread = std::f32::consts::TAU / BURST_BOLTS as f32;
-            let jitter: f32 = self.rng.random_range(-0.35..0.35);
-            let angle = self.burst_base + spread * i + jitter * spread;
-            let power = self.burst_power;
-            self.add_burst_bolt(angle, power);
-            self.burst_left -= 1;
-            // Spread wider than a bolt lives, so the fan is never all alight at once.
-            // That is as much a cost decision as a look one.
-            self.burst_timer += self.rng.random_range(0.022..0.042);
-        }
-    }
-
-    /// Move every disturbance on by `dt`, and land any implosion that has arrived.
-    fn advance_pulses(&mut self, dt: f32) {
-        let disc = self.disc;
-        for p in self.pulses.iter_mut() {
-            p.age += dt;
-            if p.imploding {
-                // Converging: the same energy crowds into an ever shorter circumference,
-                // so it runs in faster the closer it gets.
-                p.radius -= p.speed * dt;
-                p.speed *= 1.0 + 1.5 * dt;
-            } else {
-                p.radius += p.speed * dt;
-                // Thick liquid drags the crest down as it spreads.
-                p.speed *= (-1.35 * dt).exp();
-            }
-            // However the ring behaves, the impact flash is brief.
-            p.splash *= (-9.0 * dt).exp();
-        }
-
-        // An implosion that reaches the middle does not just stop; it lands.
-        let mut landed: Vec<f32> = Vec::new();
-        self.pulses.retain(|p| {
-            if p.imploding && p.radius <= disc * 0.05 {
-                landed.push(p.strength * (-1.05 * p.age).exp());
-                false
-            } else {
-                p.radius - p.width * 6.0 < disc && p.age < 12.0
-            }
-        });
-        for gathered in landed {
-            self.add_pulse(Drop::Rebound(gathered));
-
-            // It throws off energy as well as blood. The fan is queued rather than fired
-            // here so it comes out as a rush over the next fifth of a second.
-            self.burst_left = BURST_BOLTS;
-            self.burst_timer = 0.0;
-            self.burst_power = gathered.clamp(0.5, 1.5);
-            self.burst_base = self.rng.random_range(0.0..std::f32::consts::TAU);
-            // ...and the whole formation answers.
-            self.flash = 1.0;
-
-            if self.flares.len() >= MAX_FLARES {
-                self.flares.remove(0);
-            }
-            self.flares.push(Flare {
-                pos: self.center,
-                radius: self.disc * 0.3,
-                age: 0.0,
-                life: 0.5,
-                strength: self.burst_power * 1.2,
-            });
-        }
-    }
-
-    /// Advance everything by `dt`, drop whatever has finished, and spawn whatever is
-    /// due. None of this is driven by the keyboard.
-    fn advance_energy(&mut self, dt: f32) {
-        self.advance_pulses(dt);
-        self.advance_burst(dt);
-        self.advance_lit(dt);
-        self.flash *= (-6.0 * dt).exp();
-
-        for b in self.bolts.iter_mut() {
-            b.age += dt;
-        }
-        self.bolts.retain(|b| b.age < b.life);
-
-        for f in self.flares.iter_mut() {
-            f.age += dt;
-        }
-        self.flares.retain(|f| f.age < f.life);
-
-        self.next_pulse -= dt;
-        if self.next_pulse <= 0.0 {
-            // Now and then the disc draws a ring in from the rim instead of throwing one
-            // out. It is worth waiting a little longer for.
-            if self.rng.random_range(0.0..1.0) < 0.22 {
-                self.add_pulse(Drop::Implosion);
-                self.next_pulse = self.rng.random_range(4.5..7.0);
-            } else {
-                self.add_pulse(Drop::Droplet);
-                self.next_pulse = self.rng.random_range(2.6..4.8);
-            }
-        }
-        self.next_bolt -= dt;
-        if self.next_bolt <= 0.0 {
-            self.add_bolt();
-            // Mostly a quick rattle of strikes, with the occasional lull so the bursts
-            // stand out against something.
-            self.next_bolt = if self.rng.random_range(0.0..1.0) < 0.22 {
-                self.rng.random_range(0.7..1.6)
-            } else {
-                self.rng.random_range(0.08..0.35)
-            };
-        }
+        self.speed = fig.layers.iter().map(|l| l.turns as f32 / loop_secs).collect();
+        self.names = fig.layers.iter().map(|l| l.name.clone()).collect();
     }
 
     /// Which layer an unassigned key lights up: a fresh draw on every press, so
@@ -722,7 +154,7 @@ struct Gfx {
 }
 
 impl Gfx {
-    fn new(elwt: &ActiveEventLoop, uni: &Uniforms, src: &image::RgbImage) -> Self {
+    fn new(elwt: &ActiveEventLoop, uni: &Uniforms, fig: &Rendered) -> Self {
         let window = Arc::new(
             elwt.create_window(
                 Window::default_attributes()
@@ -773,19 +205,24 @@ impl Gfx {
         };
         surface.configure(&device, &surf_cfg);
 
-        let gpu = Gpu::new(&device, &queue, format, src, uni);
+        let gpu = Gpu::new(&device, &queue, format, fig, uni);
         Gfx { window, surface, device, queue, surf_cfg, gpu }
+    }
+
+    /// Upload a new figure. The pipeline is cheap to build, so it is simply rebuilt.
+    fn load(&mut self, fig: &Rendered, uni: &Uniforms) {
+        self.gpu = Gpu::new(&self.device, &self.queue, self.surf_cfg.format, fig, uni);
     }
 }
 
 struct App {
     st: State,
+    fx: Effects,
     uni: Uniforms,
-    /// The photograph, in the coordinates `layers.json` uses. Not what gets uploaded.
-    src: image::RgbImage,
-    /// What does get uploaded, and how much denser it is than those coordinates.
-    canvas: image::RgbImage,
-    canvas_scale: f32,
+    /// The figure on screen.
+    fig: Rendered,
+    /// New versions of it, each time the file is saved.
+    reloads: Receiver<Result<Rendered, FigureError>>,
     /// `None` until winit first resumes us and a window can be created.
     gfx: Option<Gfx>,
     last: Instant,
@@ -795,6 +232,22 @@ struct App {
 }
 
 impl App {
+    /// Swap in a newly saved figure, keeping everything that is still meaningful: layer
+    /// angles by name, the effects in flight, and the viewer's settings.
+    fn load(&mut self, fig: Rendered) {
+        for w in &fig.warnings {
+            println!("  warning: {w}");
+        }
+        self.st.adopt(&fig);
+        self.uni = gpu::uniforms(&fig, self.st.ss);
+        self.fx.reload(&fig);
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.load(&fig, &self.uni);
+        }
+        println!("  reloaded: {} layers, {} glyphs", fig.layers.len(), fig.glyphs.len());
+        self.fig = fig;
+    }
+
     fn redraw(&mut self) {
         let Some(gfx) = self.gfx.as_mut() else { return };
 
@@ -802,106 +255,32 @@ impl App {
         let dt = (now - self.last).as_secs_f32();
         self.last = now;
 
-        // Constant rate, always.
+        // Constant rate, always. Speeds are clockwise; the angle the shader wants runs the
+        // other way.
         for (a, s) in self.st.angle.iter_mut().zip(&self.st.speed) {
-            *a += s * dt * std::f32::consts::TAU;
+            *a -= s * dt * std::f32::consts::TAU;
         }
-        self.st.advance_energy(dt);
+        self.fx.advance(dt);
 
-        // Exponential fade, so a bloom decays at the same rate whatever the framerate.
-        let fade = (-dt / (BLOOM_DECAY / 4.0)).exp();
-        for b in self.st.bloom.iter_mut() {
-            *b *= fade;
-            if *b < 0.002 {
-                *b = 0.0;
-            }
-        }
-
-        // Fit the source into the window, preserving aspect.
-        let (sw, sh) = (self.src.width() as f32, self.src.height() as f32);
+        // Fit the canvas into the window, preserving aspect.
+        let [sw, sh] = self.fig.canvas;
         let (w, h) = (gfx.surf_cfg.width as f32, gfx.surf_cfg.height as f32);
         let scale = (w / sw).min(h / sh);
         let n = self.st.names.len();
         self.uni.fit = [scale, (w - sw * scale) * 0.5, (h - sh * scale) * 0.5, n as f32];
-        self.uni.params[0] = self.st.ss as f32;
-        self.uni.misc[0] = source_lod(scale, self.st.ss, self.canvas_scale);
-        self.uni.misc[1] = if self.st.tint { 1.0 } else { 0.0 };
-        for i in 0..n {
-            let a = self.st.angle[i];
-            // The shader rotates by this angle rather than un-rotating an arctangent,
-            // so hand it the sin/cos instead of making every pixel recompute them.
-            self.uni.layers[i].motion = [a, self.st.bloom[i], a.sin(), a.cos()];
+        self.uni.quality[0] = self.st.ss as f32;
+        self.uni.quality[3] = source_lod(scale, self.st.ss, self.fig.scale);
+        self.uni.look[1] = if self.st.tint { 1.0 } else { 0.0 };
+        for (l, &a) in self.uni.layers.iter_mut().zip(&self.st.angle) {
+            // The shader rotates by this angle rather than un-rotating an arctangent, so
+            // hand it the sin/cos instead of making every pixel recompute them. Slot 1 is
+            // the bloom, which `Effects::write` fills in.
+            let (s, c) = a.sin_cos();
+            l.motion[0] = a;
+            l.motion[2] = s;
+            l.motion[3] = c;
         }
-        self.uni.counts[0] = self.st.pulses.len() as f32;
-        self.uni.counts[1] = self.st.flares.len() as f32;
-        for (i, p) in self.st.pulses.iter().enumerate() {
-            let amount = pulse_amount(p, self.st.disc);
-            self.uni.pulses[i] = [p.radius, amount, p.width, p.wavelength];
-            // A converging ring leaves its wake behind it, which is outward.
-            let wake = if p.imploding { -1.0 } else { 1.0 };
-            self.uni.pulse_x[i] = [p.splash, p.splash_radius, wake, 0.0];
-        }
-        for (i, f) in self.st.flares.iter().enumerate() {
-            self.uni.flares[i] = [f.pos[0], f.pos[1], f.radius, flare_amount(f)];
-        }
-        // Every live bolt's limbs go into one flat list, which is all the shader wants.
-        let mut seg = 0usize;
-        for b in self.st.bolts.iter() {
-            let amount = bolt_amount(b);
-            for l in b.limbs.iter() {
-                if seg >= MAX_BOLT_SEGS {
-                    break;
-                }
-                self.uni.bolts[seg] = [l.a[0], l.a[1], l.b[0], l.b[1]];
-                self.uni.bolt_w[seg] = [amount, b.width, 0.0, 0.0];
-                seg += 1;
-            }
-        }
-        self.uni.counts[2] = seg as f32;
-        self.uni.counts[3] = self.st.flash;
-        self.uni.params[3] = self.st.lit.len() as f32;
-        for (i, l) in self.st.lit.iter().enumerate() {
-            // Where the glyph sits in the artwork, for emptying its slot.
-            self.uni.glyphs[i] = [l.pos[0], l.pos[1], l.half[0], l.half[1]];
-
-            // ...and where its copy has got to, in un-rotated space. The glyph rides its
-            // layer, so the copy has to be carried round by that layer's angle before the
-            // radial rise is added, or it would part company with the glyph it came from.
-            let ang = self.st.angle.get(l.layer).copied().unwrap_or(0.0);
-            let (s, c) = (ang.sin(), ang.cos());
-            let (ax, ay) = (l.pos[0] - self.st.center[0], l.pos[1] - self.st.center[1]);
-            // The inverse of the shader's artwork lookup, which rotates by +angle.
-            let (mut px, mut py) = (ax * c + ay * s, ay * c - ax * s);
-            let len = (px * px + py * py).sqrt().max(1e-3);
-            let travel = lit_travel(l);
-            px += px * travel / len;
-            py += py * travel / len;
-            self.uni.glyph_a[i] = [
-                self.st.center[0] + px,
-                self.st.center[1] + py,
-                lit_ghost(l),
-                lit_progress(l),
-            ];
-            self.uni.glyph_r[i] = [s, c, 0.0, 0.0];
-        }
-        // Two boxes, because the two passes happen in different frames: the glyphs are
-        // hidden where they sit in the artwork, the copies are drawn in un-rotated space.
-        // Groups are clusters, so both stay tight and almost every pixel skips both.
-        let mut art = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-        let mut scr = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
-        for (i, l) in self.st.lit.iter().enumerate() {
-            let grow = 1.0 + 1.6 * lit_progress(l);
-            let risen = [self.uni.glyph_a[i][0], self.uni.glyph_a[i][1]];
-            for k in 0..2 {
-                art[k] = art[k].min(l.pos[k] - l.half[k]);
-                art[k + 2] = art[k + 2].max(l.pos[k] + l.half[k]);
-                scr[k] = scr[k].min(risen[k] - l.half[k] * grow);
-                scr[k + 2] = scr[k + 2].max(risen[k] + l.half[k] * grow);
-            }
-        }
-        let empty = self.st.lit.is_empty();
-        self.uni.gbox = if empty { [0.0; 4] } else { art };
-        self.uni.gbox_p = if empty { [0.0; 4] } else { scr };
+        self.fx.write(&mut self.uni, &self.st.angle);
 
         gfx.queue.write_buffer(&gfx.gpu.ubuf, 0, bytemuck::bytes_of(&self.uni));
 
@@ -923,32 +302,22 @@ impl App {
         // Stalls only show up as a long gap, so keep the worst one and what caused it.
         // Anything past half a second is the compositor hiding us, not a slow frame.
         if dt > self.worst.dt && dt < 0.5 {
-            self.worst = Worst {
-                dt,
-                pulses: self.st.pulses.len(),
-                limbs: seg,
-                flares: self.st.flares.len(),
-                glyphs: self.st.lit.len(),
-                bloom: self.st.bloom.iter().cloned().fold(0.0f32, f32::max),
-            };
+            self.worst = Worst { dt, live: self.fx.census() };
         }
 
         self.fps_n += 1;
         if self.fps_t.elapsed().as_secs_f32() >= 2.0 {
+            let fps = self.fps_n as f32 / self.fps_t.elapsed().as_secs_f32();
             gfx.window.set_title(&format!(
                 "imagespin — live   {:.0} fps   {}x{}   {}x{} ss",
-                self.fps_n as f32 / self.fps_t.elapsed().as_secs_f32(),
-                gfx.surf_cfg.width,
-                gfx.surf_cfg.height,
-                self.st.ss,
-                self.st.ss
+                fps, gfx.surf_cfg.width, gfx.surf_cfg.height, self.st.ss, self.st.ss
             ));
-            let w = self.worst;
+            let Worst { dt, live: c } = self.worst;
             println!(
                 "  {:5.1} fps   worst frame {:5.2} ms  [pulses {}  limbs {}  flares {}  glyphs {}  bloom {:.2}]",
-                self.fps_n as f32 / self.fps_t.elapsed().as_secs_f32(),
-                w.dt * 1000.0,
-                w.pulses, w.limbs, w.flares, w.glyphs, w.bloom,
+                fps,
+                dt * 1000.0,
+                c.pulses, c.limbs, c.flares, c.glyphs, c.bloom,
             );
             self.worst = Worst::default();
             self.fps_n = 0;
@@ -961,7 +330,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, elwt: &ActiveEventLoop) {
         elwt.set_control_flow(ControlFlow::Poll);
         if self.gfx.is_none() {
-            self.gfx = Some(Gfx::new(elwt, &self.uni, &self.canvas));
+            self.gfx = Some(Gfx::new(elwt, &self.uni, &self.fig));
             // Timestamps from before the window existed would make the first frame jump.
             self.last = Instant::now();
             self.fps_t = Instant::now();
@@ -985,13 +354,12 @@ impl ApplicationHandler for App {
                 ..
             } => {
                 // Nothing here changes how fast anything turns — keys only light things up.
-                let n = self.st.names.len();
                 match logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => elwt.exit(),
                     Key::Named(NamedKey::F1) => help(),
 
                     // The one key that drives the energy rather than the bloom.
-                    Key::Named(NamedKey::Enter) => self.st.add_pulse(Drop::Heavy),
+                    Key::Named(NamedKey::Enter) => self.fx.drop(Drop::Heavy),
 
                     // Before the catch-all below, which blooms on any other character.
                     Key::Character("t") | Key::Character("T") => {
@@ -1009,20 +377,16 @@ impl ApplicationHandler for App {
                         self.st.ss = (self.st.ss + 1).min(4)
                     }
 
-                    Key::Named(NamedKey::Space) => {
-                        for i in 0..n {
-                            self.st.flash(i);
-                        }
-                    }
+                    Key::Named(NamedKey::Space) => self.fx.bloom.light_all(),
 
                     // 1-9 name a layer; every other key draws one at random.
                     Key::Character(s) => {
                         for c in s.chars() {
                             match c.to_digit(10) {
-                                Some(d) if d >= 1 => self.st.flash(d as usize - 1),
+                                Some(d) if d >= 1 => self.fx.bloom.light(d as usize - 1),
                                 _ => {
                                     let i = self.st.random_layer();
-                                    self.st.flash(i);
+                                    self.fx.bloom.light(i);
                                 }
                             }
                         }
@@ -1031,7 +395,7 @@ impl ApplicationHandler for App {
                     // Every remaining key still blooms something.
                     _ => {
                         let i = self.st.random_layer();
-                        self.st.flash(i);
+                        self.fx.bloom.light(i);
                     }
                 }
             }
@@ -1042,88 +406,61 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, _elwt: &ActiveEventLoop) {
+        while let Ok(result) = self.reloads.try_recv() {
+            match result {
+                Ok(fig) => self.load(fig),
+                Err(e) => eprintln!("\n{e}\n  (still showing the last figure that loaded)\n"),
+            }
+        }
         if let Some(gfx) = self.gfx.as_ref() {
             gfx.window.request_redraw();
         }
     }
 }
 
-fn main() {
+/// Texture pixels per canvas unit. Twice, so the thin lines stay crisp when the window is
+/// larger than the canvas; it is also the knob for how much GPU memory the layers take.
+const CANVAS_SCALE: f32 = 2.0;
+
+fn main() -> ExitCode {
     env_logger::init();
-    let cfg_path = std::env::args().nth(1).unwrap_or_else(|| "layers.json".into());
-    let (cfg, src) = config::load(&cfg_path);
-    let layers = gpu::ordered_layers(&cfg);
-
-    // Fixed for the session: the same speeds the GIF renders at.
-    let fps = cfg.fps.max(1) as f32;
-    let loop_secs = cfg.frames as f32 / fps;
-    let disc = layers.iter().map(|l| l.outer.max_radius()).fold(0.0f32, f32::max);
-
-    // The canvas the shader samples: drawn outside the hand-over, photographed inside.
-    // Coordinates stay in the scan's space; `canvas_scale` is only texture density.
-    let canvas_scale = 2.0;
-    let nominal = [src.width() as f32, src.height() as f32];
-    let canvas = sigil::over(&cfg, &sigil::Figure::default(), &src, canvas_scale);
-    println!(
-        "  canvas {}x{} ({}x the artwork)",
-        canvas.width(),
-        canvas.height(),
-        canvas_scale
-    );
-
-    // Walk it once for its letters and symbols, so the viewer can light one. The canvas
-    // rather than the scan, which no longer agrees with it about where a letter is.
-    // Scaled back down first: the size filters are in artwork pixels.
-    let catalogue = {
-        let at_artwork = image::imageops::resize(
-            &canvas,
-            src.width(),
-            src.height(),
-            image::imageops::FilterType::Lanczos3,
-        );
-        imagespin::glyphs::find(&at_artwork, cfg.center, disc)
+    let path = PathBuf::from(std::env::args().nth(1).unwrap_or_else(|| "figure.json5".into()));
+    let fig = match Figure::load(&path) {
+        Ok(f) => f.render(CANVAS_SCALE),
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
     };
-    println!("  {} glyphs found on the canvas", catalogue.len());
+    let side = fig.layers[0].image.width();
+    println!("  {} layers of {side}x{side}, {} glyphs", fig.layers.len(), fig.glyphs.len());
+    for w in &fig.warnings {
+        println!("  warning: {w}");
+    }
+
     let ss = 2;
-    let st = State {
-        speed: layers.iter().map(|l| l.turns as f32 / loop_secs).collect(),
-        angle: vec![0.0; layers.len()],
-        bloom: vec![0.0; layers.len()],
-        names: layers.iter().map(|l| l.name.clone()).collect(),
+    let mut st = State {
+        speed: Vec::new(),
+        angle: Vec::new(),
+        names: Vec::new(),
         ss,
         tint: false,
         rng: rand::make_rng(),
-        pulses: Vec::new(),
-        bolts: Vec::new(),
-        flares: Vec::new(),
-        // Do not open on a pulse; let the diagram turn for a moment first.
-        next_pulse: 1.4,
-        next_bolt: 0.6,
-        // The first bolt has nowhere to come from, so start it at the centre.
-        spark_at: cfg.center,
-        burst_left: 0,
-        burst_timer: 0.0,
-        burst_power: 0.0,
-        burst_base: 0.0,
-        flash: 0.0,
-        layers: layers.clone(),
-        catalogue,
-        lit: Vec::new(),
-        next_lit: 1.1,
-        center: cfg.center,
-        disc,
     };
+    st.adopt(&fig);
 
     help();
     st.describe();
+    println!("\n  watching {} for changes", path.display());
 
-    let uni = gpu::uniforms(&cfg, &layers, &canvas, nominal, ss);
+    let uni = gpu::uniforms(&fig, ss);
+    let fx = Effects::new(&fig);
     let mut app = App {
         st,
+        fx,
         uni,
-        src,
-        canvas,
-        canvas_scale,
+        reloads: figure::watch(path, CANVAS_SCALE),
+        fig,
         gfx: None,
         last: Instant::now(),
         fps_t: Instant::now(),
@@ -1132,4 +469,5 @@ fn main() {
     };
 
     EventLoop::new().unwrap().run_app(&mut app).unwrap();
+    ExitCode::SUCCESS
 }
