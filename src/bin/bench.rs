@@ -115,7 +115,7 @@ fn main() {
     let (w, h) = (args.width as f32, args.height as f32);
     let scale = (w / sw).min(h / sh);
     uni.fit = [scale, (w - sw * scale) * 0.5, (h - sh * scale) * 0.5, n_layers as f32];
-    // Same rule the viewer uses, bias included — see `source_lod` in live.rs.
+    // Same rule the viewer uses, bias included — see `source_lod` in engine.rs.
     uni.quality[3] = (-(scale * args.ss as f32 / canvas_scale).max(1e-3).log2() - 0.35).max(0.0);
     for i in 0..n_layers {
         // A fixed angle off the axes, so no layer lands on a degenerate case.
@@ -331,7 +331,9 @@ fn simulate(fig: &Rendered, uni: &mut Uniforms, secs: f32, trigger: Option<&str>
         fx.skip_build();
     }
     match trigger {
-        Some("surge") => fx.surge(),
+        Some("surge") => {
+            fx.surge();
+        }
         Some("color") => fx.color_wave(),
         Some("dissolve") => fx.dissolve(),
         Some("scramble") => fx.scramble(),

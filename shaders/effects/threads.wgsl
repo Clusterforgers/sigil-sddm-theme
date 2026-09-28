@@ -9,7 +9,7 @@ fn threads_at(p: vec2<f32>) -> f32 {
     var acc = 0.0;
     let n = u32(u.live2.x);
     for (var i = 0u; i < n; i = i + 1u) {
-        let t = u.threads[i];
+        let t = uni_thread(i);
         let a = t.seg.xy;
         let b = t.seg.zw;
         // Nothing reaches more than a few units off the line.

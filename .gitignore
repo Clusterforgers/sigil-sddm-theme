@@ -7,3 +7,7 @@ devenv.local.nix
 /sigil.png
 /layers/
 /glyphs.png
+
+# plugin build and staged theme (scripts/try.sh)
+/build-qt/
+/result

@@ -1,0 +1,12 @@
+[package]
+name = "sigil-ffi"
+version = "0.1.0"
+edition = "2021"
+description = "The sigil engine behind a C interface, for the Qt login-screen plugin"
+
+[lib]
+crate-type = ["staticlib"]
+
+[dependencies]
+imagespin = { path = ".." }
+bytemuck = "1.14"

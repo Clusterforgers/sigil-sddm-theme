@@ -1,4 +1,5 @@
 pub mod effects;
+pub mod engine;
 pub mod figure;
 pub mod geometric;
 pub mod gpu;

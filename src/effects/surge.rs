@@ -36,11 +36,14 @@ pub struct Surge {
     /// How far each layer flies when the formation breaks, as extra scale at the end of
     /// the scatter. Drawn fresh each time so no two explosions look alike.
     flight: Vec<f32>,
+    /// Coming back because it was called off rather than because it ran its course: the
+    /// figure snaps back as it is instead of writing itself in again.
+    aborted: bool,
 }
 
 impl Surge {
     pub fn new() -> Self {
-        Surge { phase: Phase::Idle, t: 0.0, flight: Vec::new() }
+        Surge { phase: Phase::Idle, t: 0.0, flight: Vec::new(), aborted: false }
     }
 
     /// Start the sequence, unless it is already running. True if it started.
@@ -50,6 +53,7 @@ impl Surge {
         }
         self.phase = Phase::Charge;
         self.t = 0.0;
+        self.aborted = false;
         // Inner layers fly further: they have further to go to clear the outer ones.
         self.flight = (0..layers)
             .map(|i| {
@@ -81,6 +85,23 @@ impl Surge {
         self.phase = next;
         self.t = 0.0;
         exploded
+    }
+
+    /// Call the sequence off wherever it has got to and bring the formation straight back,
+    /// even if it was told to stay broken. True if there was anything to call off.
+    pub fn abort(&mut self) -> bool {
+        if matches!(self.phase, Phase::Idle | Phase::Reform) {
+            return false;
+        }
+        self.phase = Phase::Reform;
+        self.t = 0.0;
+        self.aborted = true;
+        true
+    }
+
+    /// Whether the current reform is an aborted one, which does not redraw the figure.
+    pub fn aborted(&self) -> bool {
+        self.aborted && self.phase == Phase::Reform
     }
 
     /// Whether the sequence is running, in which case the ambient effects hold off.
@@ -199,6 +220,20 @@ mod tests {
         run(&mut s, &t, 2.5);
         assert!(!s.busy());
         assert_eq!(s.form(0, &t), (1.0, 1.0), "back as it was");
+    }
+
+    #[test]
+    fn abort_brings_it_back_even_when_told_to_stay_broken() {
+        let (t, mut rng) = (timing(true), rand::make_rng());
+        let mut s = Surge::new();
+        assert!(!s.abort(), "nothing to call off");
+        s.start(&mut rng, 3);
+        run(&mut s, &t, 5.0);
+        assert!(s.abort());
+        assert!(s.aborted());
+        assert_eq!(run(&mut s, &t, 1.5), 0, "an abort does not explode again");
+        assert!(!s.busy());
+        assert_eq!(s.form(0, &t), (1.0, 1.0));
     }
 
     #[test]

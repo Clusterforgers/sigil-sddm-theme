@@ -90,7 +90,8 @@ struct GpuGlyph {
 // Mirrors `gpu::Uniforms`; see the tests in `gpu/uniforms.rs`.
 struct Uniforms {
     center: vec2<f32>,
-    _pad: vec2<f32>,
+    // flip height (0: y already runs down), encode sRGB (0: the target does it)
+    host: vec2<f32>,
     // origin x, origin y, side, unused — the square every layer texture covers
     frame: vec4<f32>,
     // scale, offset.x, offset.y, live layers
@@ -114,19 +115,35 @@ struct Uniforms {
     // ...and around the risen copies, in un-rotated space
     gbox_p: vec4<f32>,
     background: vec4<f32>,
-    pulses: array<GpuPulse, MAX_PULSES>,
-    flares: array<GpuFlare, MAX_FLARES>,
-    limbs: array<GpuLimb, MAX_BOLT_SEGS>,
-    glyphs: array<GpuGlyph, MAX_GLYPHS>,
-    waves: array<GpuWave, MAX_WAVES>,
-    swaps: array<GpuSwap, MAX_SWAPS>,
-    threads: array<GpuThread, MAX_THREADS>,
-    ripples: array<GpuRipple, MAX_RIPPLES>,
-    marks: array<GpuMark, MAX_MARKS>,
-    layers: array<GpuLayer, MAX_LAYERS>,
+    // The per-effect arrays, each element's vec4s laid end to end. The same bytes as an
+    // array of the structs above, but Qt's OpenGL backend sets a uniform block member by
+    // member and cannot see inside an array of structs; `uni_pulse(i)` and the rest below
+    // put the structs back together.
+    pulses: array<vec4<f32>, MAX_PULSES * 2u>,
+    flares: array<vec4<f32>, MAX_FLARES>,
+    limbs: array<vec4<f32>, MAX_BOLT_SEGS * 2u>,
+    glyphs: array<vec4<f32>, MAX_GLYPHS * 3u>,
+    waves: array<vec4<f32>, MAX_WAVES * 2u>,
+    swaps: array<vec4<f32>, MAX_SWAPS * 3u>,
+    threads: array<vec4<f32>, MAX_THREADS * 2u>,
+    ripples: array<vec4<f32>, MAX_RIPPLES>,
+    marks: array<vec4<f32>, MAX_MARKS * 2u>,
+    layers: array<vec4<f32>, MAX_LAYERS * 3u>,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
+
+// Element `i` of each array in the uniform block, as its struct.
+fn uni_pulse(i: u32) -> GpuPulse { return GpuPulse(u.pulses[2u * i], u.pulses[2u * i + 1u]); }
+fn uni_flare(i: u32) -> GpuFlare { return GpuFlare(u.flares[i]); }
+fn uni_limb(i: u32) -> GpuLimb { return GpuLimb(u.limbs[2u * i], u.limbs[2u * i + 1u]); }
+fn uni_glyph(i: u32) -> GpuGlyph { return GpuGlyph(u.glyphs[3u * i], u.glyphs[3u * i + 1u], u.glyphs[3u * i + 2u]); }
+fn uni_wave(i: u32) -> GpuWave { return GpuWave(u.waves[2u * i], u.waves[2u * i + 1u]); }
+fn uni_swap(i: u32) -> GpuSwap { return GpuSwap(u.swaps[3u * i], u.swaps[3u * i + 1u], u.swaps[3u * i + 2u]); }
+fn uni_thread(i: u32) -> GpuThread { return GpuThread(u.threads[2u * i], u.threads[2u * i + 1u]); }
+fn uni_ripple(i: u32) -> GpuRipple { return GpuRipple(u.ripples[i]); }
+fn uni_mark(i: u32) -> GpuMark { return GpuMark(u.marks[2u * i], u.marks[2u * i + 1u]); }
+fn uni_layer(i: u32) -> GpuLayer { return GpuLayer(u.layers[3u * i], u.layers[3u * i + 1u], u.layers[3u * i + 2u]); }
 // One slice per layer: premultiplied, transparent where the layer has no ink.
 @group(0) @binding(1) var art_tex: texture_2d_array<f32>;
 @group(0) @binding(2) var art_smp: sampler;

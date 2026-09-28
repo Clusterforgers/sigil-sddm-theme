@@ -1,5 +1,6 @@
-use imagespin::effects::{Census, Effects};
-use imagespin::gpu::{self, Gpu, Uniforms};
+use imagespin::effects::Census;
+use imagespin::engine::Engine;
+use imagespin::gpu::{Gpu, Uniforms};
 use imagespin::figure::{self, Figure, FigureError, Rendered};
 
 use std::path::PathBuf;
@@ -16,24 +17,6 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{Key, NamedKey};
 use winit::window::{Window, WindowId};
 
-/// Which mip of the artwork to read, given how the window maps onto it.
-///
-/// One sub-sample covers `1 / (fit * ss)` source texels; when that exceeds one the disc is
-/// being minified and level 0 is undersampled, which is what makes the thin gold lines
-/// crawl. Below one there is nothing to gain, so the level floors at zero.
-///
-/// The bias is not a fudge. Trilinear filtering blends toward a full 2x2 box, which is a
-/// wider filter than the footprint actually calls for, so the straight `-log2` over-blurs.
-/// Fitted against a brute-force `ss=8` render: -0.35 beats both level 0 and an unbiased
-/// level on closeness to that reference *and* on high-frequency energy, at 714x427 and at
-/// 500x300 alike.
-fn source_lod(fit_scale: f32, ss: u32, canvas_scale: f32) -> f32 {
-    // `canvas_scale` is how much denser the texture is than the coordinate space, which
-    // shifts the whole thing by one level per doubling.
-    let rate = (fit_scale * ss as f32 / canvas_scale.max(1e-3)).max(1e-3);
-    (-rate.log2() - 0.35).max(0.0)
-}
-
 /// The worst frame seen in a reporting interval, and what was on screen for it.
 ///
 /// A vsync-locked viewer cannot be timed by asking the GPU politely — every frame appears
@@ -46,16 +29,12 @@ struct Worst {
     live: Census,
 }
 
-/// How the layers turn, and how the viewer is set to draw them.
+/// How the layers turn, for the listings.
 struct State {
     /// Revolutions per second, positive clockwise, from each layer's `turns`.
     speed: Vec<f32>,
     /// Names of the layers.
     names: Vec<String>,
-    /// Supersampling factor, 1-4.
-    ss: u32,
-    /// Paint each layer in its own colour, for telling which ring turns with which.
-    tint: bool,
 }
 
 impl State {
@@ -119,6 +98,7 @@ fn help() {
     F6           colour each layer differently, to see which ring is which
     F7 / F8      supersampling down / up (antialiasing vs framerate)
     F9           bloom every layer at once
+    F10          a refused password: the surge is called off and the figure snaps back
     F1           this help
     Esc          quit
 
@@ -202,10 +182,7 @@ impl Gfx {
 
 struct App {
     st: State,
-    fx: Effects,
-    uni: Uniforms,
-    /// The figure on screen.
-    fig: Rendered,
+    engine: Engine,
     /// New versions of it, each time the file is saved.
     reloads: Receiver<Result<Rendered, FigureError>>,
     /// `None` until winit first resumes us and a window can be created.
@@ -224,13 +201,11 @@ impl App {
             println!("  warning: {w}");
         }
         self.st.adopt(&fig);
-        self.uni = gpu::uniforms(&fig, self.st.ss);
-        self.fx.reload(&fig);
-        if let Some(gfx) = self.gfx.as_mut() {
-            gfx.load(&fig, &self.uni);
-        }
         println!("  reloaded: {} layers, {} glyphs", fig.layers.len(), fig.glyphs.len());
-        self.fig = fig;
+        self.engine.load(fig);
+        if let Some(gfx) = self.gfx.as_mut() {
+            gfx.load(&self.engine.fig, self.engine.uniforms());
+        }
     }
 
     fn redraw(&mut self) {
@@ -240,23 +215,9 @@ impl App {
         let dt = (now - self.last).as_secs_f32();
         self.last = now;
 
-        self.fx.advance(dt);
-
-        // Fit the canvas into the window, preserving aspect.
-        let [sw, sh] = self.fig.canvas;
         let (w, h) = (gfx.surf_cfg.width as f32, gfx.surf_cfg.height as f32);
-        let scale = (w / sw).min(h / sh);
-        let n = self.st.names.len();
-        // The surge shakes the whole picture, which is just moving where it is fitted.
-        let [jx, jy] = self.fx.shake();
-        let (ox, oy) = ((w - sw * scale) * 0.5 + jx * scale, (h - sh * scale) * 0.5 + jy * scale);
-        self.uni.fit = [scale, ox, oy, n as f32];
-        self.uni.quality[0] = self.st.ss as f32;
-        self.uni.quality[3] = source_lod(scale, self.st.ss, self.fig.scale);
-        self.uni.look[1] = if self.st.tint { 1.0 } else { 0.0 };
-        self.fx.write(&mut self.uni);
-
-        gfx.queue.write_buffer(&gfx.gpu.ubuf, 0, bytemuck::bytes_of(&self.uni));
+        let uni = self.engine.frame(dt, w, h);
+        gfx.queue.write_buffer(&gfx.gpu.ubuf, 0, bytemuck::bytes_of(uni));
 
         let frame = match gfx.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(f) | CurrentSurfaceTexture::Suboptimal(f) => f,
@@ -276,7 +237,7 @@ impl App {
         // Stalls only show up as a long gap, so keep the worst one and what caused it.
         // Anything past half a second is the compositor hiding us, not a slow frame.
         if dt > self.worst.dt && dt < 0.5 {
-            self.worst = Worst { dt, live: self.fx.census() };
+            self.worst = Worst { dt, live: self.engine.fx.census() };
         }
 
         self.fps_n += 1;
@@ -284,7 +245,7 @@ impl App {
             let fps = self.fps_n as f32 / self.fps_t.elapsed().as_secs_f32();
             gfx.window.set_title(&format!(
                 "imagespin — live   {:.0} fps   {}x{}   {}x{} ss",
-                fps, gfx.surf_cfg.width, gfx.surf_cfg.height, self.st.ss, self.st.ss
+                fps, gfx.surf_cfg.width, gfx.surf_cfg.height, self.engine.ss, self.engine.ss
             ));
             let Worst { dt, live: c } = self.worst;
             println!(
@@ -304,7 +265,7 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, elwt: &ActiveEventLoop) {
         elwt.set_control_flow(ControlFlow::Poll);
         if self.gfx.is_none() {
-            self.gfx = Some(Gfx::new(elwt, &self.uni, &self.fig));
+            self.gfx = Some(Gfx::new(elwt, self.engine.uniforms(), &self.engine.fig));
             // Timestamps from before the window existed would make the first frame jump.
             self.last = Instant::now();
             self.fps_t = Instant::now();
@@ -329,41 +290,43 @@ impl ApplicationHandler for App {
             } => {
                 // Every printable key is typing, as it will be on a login screen; everything
                 // the viewer itself offers sits on the function keys, out of its way.
+                let e = &mut self.engine;
                 match logical_key.as_ref() {
                     Key::Named(NamedKey::Escape) => elwt.exit(),
-                    Key::Named(NamedKey::Enter) => self.fx.surge(),
-                    Key::Named(NamedKey::Backspace) => self.fx.backspace(),
-                    Key::Named(NamedKey::Space) => self.fx.key(),
-                    Key::Character(_) => self.fx.key(),
+                    Key::Named(NamedKey::Enter) => {
+                        e.fx.surge();
+                    }
+                    Key::Named(NamedKey::Backspace) => e.fx.backspace(),
+                    Key::Named(NamedKey::Space) => e.fx.key(),
+                    Key::Character(_) => e.fx.key(),
 
                     Key::Named(NamedKey::F1) => help(),
-                    Key::Named(NamedKey::F2) => self.fx.color_wave(),
-                    Key::Named(NamedKey::F3) => self.fx.dissolve(),
-                    Key::Named(NamedKey::F4) => self.fx.scramble(),
-                    Key::Named(NamedKey::F5) => self.fx.constellation(),
+                    Key::Named(NamedKey::F2) => e.fx.color_wave(),
+                    Key::Named(NamedKey::F3) => e.fx.dissolve(),
+                    Key::Named(NamedKey::F4) => e.fx.scramble(),
+                    Key::Named(NamedKey::F5) => e.fx.constellation(),
                     Key::Named(NamedKey::F6) => {
-                        self.st.tint = !self.st.tint;
-                        if self.st.tint {
+                        e.tint = !e.tint;
+                        if e.tint {
                             self.st.legend();
                         } else {
                             println!("  layer colours off");
                         }
                     }
                     // Supersampling is a render-quality knob, not a motion one.
-                    Key::Named(NamedKey::F7) => self.st.ss = self.st.ss.saturating_sub(1).max(1),
-                    Key::Named(NamedKey::F8) => self.st.ss = (self.st.ss + 1).min(4),
-                    Key::Named(NamedKey::F9) => self.fx.bloom.light_all(),
+                    Key::Named(NamedKey::F7) => e.ss = e.ss.saturating_sub(1).max(1),
+                    Key::Named(NamedKey::F8) => e.ss = (e.ss + 1).min(4),
+                    Key::Named(NamedKey::F9) => e.fx.bloom.light_all(),
+                    Key::Named(NamedKey::F10) => e.fx.fail(),
                     _ => {}
                 }
             }
 
             // The pointer, turned from window pixels into canvas units by undoing the fit.
             WindowEvent::CursorMoved { position, .. } => {
-                let [scale, ox, oy, _] = self.uni.fit;
-                let at = [(position.x as f32 - ox) / scale, (position.y as f32 - oy) / scale];
-                self.fx.pointer(Some(at));
+                self.engine.pointer(Some([position.x as f32, position.y as f32]));
             }
-            WindowEvent::CursorLeft { .. } => self.fx.pointer(None),
+            WindowEvent::CursorLeft { .. } => self.engine.pointer(None),
 
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
@@ -403,27 +366,17 @@ fn main() -> ExitCode {
         println!("  warning: {w}");
     }
 
-    let ss = 2;
-    let mut st = State {
-        speed: Vec::new(),
-        names: Vec::new(),
-        ss,
-        tint: false,
-    };
+    let mut st = State { speed: Vec::new(), names: Vec::new() };
     st.adopt(&fig);
 
     help();
     st.describe();
     println!("\n  watching {} for changes", path.display());
 
-    let uni = gpu::uniforms(&fig, ss);
-    let fx = Effects::new(&fig);
     let mut app = App {
         st,
-        fx,
-        uni,
+        engine: Engine::new(fig, 2),
         reloads: figure::watch(path, CANVAS_SCALE),
-        fig,
         gfx: None,
         last: Instant::now(),
         fps_t: Instant::now(),

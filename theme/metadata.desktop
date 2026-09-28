@@ -1,0 +1,11 @@
+[SddmGreeterTheme]
+Name=Sigil
+Description=The Sigillum Dei Aemeth, turning; the password written in symbols beneath it
+Author=Chrisser1
+Type=sddm-theme
+Version=0.1
+MainScript=Main.qml
+ConfigFile=theme.conf
+Theme-Id=sigil
+Theme-API=2.0
+QtVersion=6

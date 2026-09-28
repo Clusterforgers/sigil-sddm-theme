@@ -8,7 +8,7 @@ fn flare_at(p: vec2<f32>) -> f32 {
     var acc = 0.0;
     let n = u32(u.live.y);
     for (var i = 0u; i < n; i = i + 1u) {
-        let s = u.flares[i].at;
+        let s = uni_flare(i).at;
         let d = (p - s.xy) / s.z;
         let t = max(1.0 - dot(d, d), 0.0);
         acc = acc + s.w * t * t;

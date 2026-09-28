@@ -21,10 +21,12 @@ tiny-skia = "0.12"
 ttf-parser = "0.25"
 json5 = "1"
 serde_path_to_error = "0.1"
+# Already built by wgpu. Validates the assembled WGSL in the tests, and translates it to
+# GLSL for the Qt plugin (src/bin/export-shaders.rs).
+naga = { version = "30", features = ["wgsl-in", "glsl-out"] }
 
 [profile.release]
 opt-level = 3
 
-[dev-dependencies]
-# Already built by wgpu; used to validate the assembled WGSL in tests.
-naga = { version = "30", features = ["wgsl-in"] }
+[workspace]
+members = [".", "sigil-ffi"]

@@ -11,7 +11,7 @@ fn ripples_at(p: vec2<f32>) -> f32 {
     var acc = 0.0;
     let n = u32(u.live2.y);
     for (var i = 0u; i < n; i = i + 1u) {
-        let r = u.ripples[i].at;
+        let r = uni_ripple(i).at;
         let d = (length(p - r.xy) - r.z) / 7.0;
         acc = acc + r.w * exp(-d * d);
     }
@@ -32,7 +32,7 @@ fn marks_at(q: vec2<f32>, k: u32) -> f32 {
     var acc = 0.0;
     let n = u32(u.live2.z);
     for (var i = 0u; i < n; i = i + 1u) {
-        let m = u.marks[i];
+        let m = uni_mark(i);
         if (u32(m.slot.w) != k) { continue; }
         let d2 = dot(q - m.slot.xy, q - m.slot.xy) / (m.slot.z * m.slot.z);
         let t = 1.0 - smoothstep(0.3, 1.0, d2);
@@ -46,7 +46,7 @@ fn marks_halo(p: vec2<f32>) -> f32 {
     var acc = 0.0;
     let n = u32(u.live2.z);
     for (var i = 0u; i < n; i = i + 1u) {
-        let m = u.marks[i];
+        let m = uni_mark(i);
         let reach = m.slot.z * 3.0;
         let d = p - m.glow.zw;
         acc = acc + (m.glow.x * 0.12 + m.glow.y * 0.5) * exp(-dot(d, d) / (reach * reach));

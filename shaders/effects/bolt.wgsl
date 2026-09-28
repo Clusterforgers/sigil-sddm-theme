@@ -27,8 +27,8 @@ fn bolt_at(p: vec2<f32>) -> vec2<f32> {
     var halo = 0.0;
     let n = u32(u.live.z);
     for (var i = 0u; i < n; i = i + 1u) {
-        let s = u.limbs[i].seg;
-        let w = u.limbs[i].style;
+        let s = uni_limb(i).seg;
+        let w = uni_limb(i).style;
         let reach = w.y * 12.0;
         let lo = min(s.xy, s.zw) - reach;
         let hi = max(s.xy, s.zw) + reach;

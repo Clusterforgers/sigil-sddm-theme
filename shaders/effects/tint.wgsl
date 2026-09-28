@@ -7,7 +7,7 @@ fn tint_at(r: f32) -> vec4<f32> {
     var acc = vec4<f32>(0.0);
     let n = u32(u.ambient.w);
     for (var i = 0u; i < n; i = i + 1u) {
-        let w = u.waves[i];
+        let w = uni_wave(i);
         // Positive behind the front: inward for a wave travelling out, outward for one
         // travelling in.
         let s = w.front.w * (w.front.x - r) / w.front.y;

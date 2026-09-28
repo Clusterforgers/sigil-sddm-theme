@@ -80,7 +80,7 @@ fn shade(p: vec2<f32>, f: Fields) -> vec3<f32> {
     var glow = vec3<f32>(0.0);
     let n = u32(u.fit.w);
     for (var k: u32 = 0u; k < n; k = k + 1u) {
-        let L = u.layers[k];
+        let L = uni_layer(k);
 
         // A layer the surge has faded out is not there at all...
         if (L.form.y <= 0.002) { continue; }
@@ -252,7 +252,12 @@ fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
 }
 
 @fragment
-fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn fs(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    // Pixels count down from the top everywhere below; a y-up host turns its own round.
+    var pos = frag;
+    if (u.host.x > 0.0) {
+        pos.y = u.host.x - pos.y;
+    }
     // A uniform grid, deliberately. A rotated grid is the usual improvement, but it only
     // pays for geometric edges, and this renderer has none worth the name: the disc cut and
     // every layer boundary sit in empty gaps by construction, so all the visible detail is
@@ -294,5 +299,16 @@ fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let fall = exp(-dot(cd, cd) / (u.quality.y * u.quality.y) * 0.6);
         col = col + BLAST * (u.look.z * (0.3 + 1.5 * fall));
     }
+    if (u.host.y > 0.0) {
+        col = encode_srgb(col);
+    }
     return vec4<f32>(col, 1.0);
+}
+
+/// Linear light to sRGB, for a target that stores what it is given as it is.
+fn encode_srgb(c: vec3<f32>) -> vec3<f32> {
+    let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+    let lo = x * 12.92;
+    let hi = 1.055 * pow(x, vec3<f32>(1.0 / 2.4)) - 0.055;
+    return select(hi, lo, x <= vec3<f32>(0.0031308));
 }

@@ -38,6 +38,11 @@ use rand::RngExt;
 /// How far behind a layer its echoes trail, in seconds of its own spin.
 const ECHO_SECONDS: f32 = 0.045;
 
+/// What a refused password looks like: the wave of red it sends through the figure, and
+/// how hard it shakes the picture to begin with, in canvas units.
+const FAIL_COLOR: crate::figure::Rgb = crate::figure::Rgb([0xC0, 0x12, 0x0C]);
+const FAIL_JOLT: f32 = 16.0;
+
 /// Smoothstep, for envelopes that must not pop at either end.
 pub(crate) fn smoothstep(a: f32, b: f32, x: f32) -> f32 {
     let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
@@ -87,6 +92,11 @@ pub struct Effects {
     /// What Enter sets off, and this frame's screen shake from it, in canvas units.
     surge: Surge,
     shake: [f32; 2],
+    /// Set on the frame the surge explodes, until a host takes it: the moment a login
+    /// screen hands the password over.
+    detonated: bool,
+    /// A hard shake that dies away, in canvas units: the figure refusing a password.
+    jolt: f32,
     waves: Pool<ColorWave>,
     dissolves: Pool<Dissolve>,
     swaps: Pool<Swap>,
@@ -130,6 +140,8 @@ impl Effects {
             spark_at: fig.center,
             surge: Surge::new(),
             shake: [0.0; 2],
+            detonated: false,
+            jolt: 0.0,
             waves: Pool::new(MAX_WAVES),
             dissolves: Pool::new(4),
             swaps: Pool::new(MAX_SWAPS),
@@ -273,11 +285,13 @@ impl Effects {
     }
 
     /// Set off the surge: a blood drop lands, the figure spins up and gathers light, and
-    /// explodes. Does nothing while one is already running.
-    pub fn surge(&mut self) {
-        if self.surge.start(&mut self.rng, self.bloom.layers()) {
+    /// explodes. Does nothing while one is already running. True if it started.
+    pub fn surge(&mut self) -> bool {
+        let started = self.surge.start(&mut self.rng, self.bloom.layers());
+        if started {
             self.drop(Drop::Heavy);
         }
+        started
     }
 
     /// How fast layer `i` turns right now, in revolutions per second, given its own
@@ -287,6 +301,22 @@ impl Effects {
         let (mult, extra) = self.surge.spin(&self.settings.surge);
         let way = if speed != 0.0 { speed.signum() } else if i.is_multiple_of(2) { 1.0 } else { -1.0 };
         speed * (1.0 + mult) + way * extra
+    }
+
+    /// Whether the surge has exploded since this was last asked. Asking clears it, so each
+    /// explosion is reported exactly once.
+    pub fn take_detonated(&mut self) -> bool {
+        std::mem::take(&mut self.detonated)
+    }
+
+    /// The password was wrong: call the surge off and snap the formation back, shaking, with
+    /// a wave of red through it and every typed letter put out.
+    pub fn fail(&mut self) {
+        self.surge.abort();
+        self.detonated = false;
+        self.typing.clear();
+        self.jolt = FAIL_JOLT;
+        self.waves.push(ColorWave::new(self.sky.disc, FAIL_COLOR, false));
     }
 
     /// How far to nudge the whole picture this frame, in canvas units.
@@ -364,20 +394,24 @@ impl Effects {
         // Drawing itself in: over its own time at startup, and in step with the reform after
         // a surge, so the figure writes itself back rather than fading in.
         match self.surge.reforming(&timing) {
-            Some(u) if self.settings.build.after_surge => self.build = u,
+            Some(u) if self.settings.build.after_surge && !self.surge.aborted() => self.build = u,
+            // Called off: the figure comes back whole, not written in again.
+            Some(_) => self.build = 1.0,
             _ => self.build = (self.build + dt / self.settings.build.duration).min(1.0),
         }
         if self.surge.advance(dt, &timing) {
             // Bigger than any implosion, and the letters in flight go with the formation.
             self.detonate(1.5);
             self.collapse = 1.6;
+            self.detonated = true;
             self.lit = Pool::new(MAX_GLYPHS);
             // Whatever was typed goes with it.
             self.typing.clear();
         }
         // Every layer gathers light as the charge builds, all the way to full.
         self.bloom.raise_all(self.surge.charge(&timing));
-        let amount = self.surge.shake(&timing);
+        self.jolt *= (-7.0 * dt).exp();
+        let amount = self.surge.shake(&timing) + self.jolt;
         self.shake = if amount > 0.0 {
             [self.rng.random_range(-amount..amount), self.rng.random_range(-amount..amount)]
         } else {
@@ -465,7 +499,7 @@ impl Effects {
             let (s, c) = angles[i].sin_cos();
             l.motion = [angles[i], self.bloom.level(i), s, c];
             let (scale, mut opacity) = self.surge.form(i, timing);
-            if self.settings.build.after_surge && self.surge.reforming(timing).is_some() {
+            if self.settings.build.after_surge && self.surge.reforming(timing).is_some() && !self.surge.aborted() {
                 // The build is doing the appearing; fading in on top would only mute it.
                 opacity = 1.0;
             }
@@ -715,6 +749,34 @@ mod tests {
         fx.write(&mut uni);
         assert!((uni.rhythm[3] - 0.5).abs() < 0.05, "{}", uni.rhythm[3]);
         assert!(uni.layers[0].form[1] > 0.99, "the reform fades in on top of the build");
+    }
+
+    /// The login round trip: the explosion is reported once, and a refused password brings
+    /// the formation back whole without drawing it in again.
+    #[test]
+    fn a_refused_password_reforms_the_figure_at_once() {
+        let mut fx = effects();
+        fx.skip_build();
+        fx.settings.surge = SurgeTiming { charge: 0.5, scatter: 0.5, hold: 0.5, reform: 0.5, stay_broken: true };
+        fx.surge();
+        let mut reports = 0;
+        for _ in 0..120 {
+            fx.advance(1.0 / 60.0);
+            reports += fx.take_detonated() as usize;
+        }
+        assert_eq!(reports, 1, "the explosion is reported exactly once");
+        fx.fail();
+        let mut uni: Uniforms = bytemuck::Zeroable::zeroed();
+        fx.advance(1.0 / 60.0);
+        fx.write(&mut uni);
+        assert_eq!(uni.rhythm[3], 1.0, "the figure is redrawn instead of snapping back whole");
+        assert!(fx.shake() != [0.0; 2], "no jolt");
+        for _ in 0..60 {
+            fx.advance(1.0 / 60.0);
+        }
+        fx.write(&mut uni);
+        assert!(!fx.surge.busy(), "a stay-broken surge stayed broken after fail()");
+        assert!(uni.layers.iter().take(fx.speeds().len()).all(|l| l.form[..2] == [1.0, 1.0]));
     }
 
     /// An implosion runs all the way in, lands, and throws its rebound and fan out.

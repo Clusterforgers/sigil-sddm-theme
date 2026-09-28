@@ -149,7 +149,10 @@ pub struct GpuGlyph {
 pub struct Uniforms {
     /// Centre of the figure, in canvas units.
     pub center: [f32; 2],
-    pub _pad: [f32; 2],
+    /// (flip height, encode sRGB): for hosts that are not the wgpu viewer. A y-up
+    /// framebuffer sets the first to its height in pixels, and a target that is not sRGB
+    /// sets the second to 1 so the shader encodes what it writes. Both 0 in wgpu.
+    pub host: [f32; 2],
     /// (origin x, origin y, side, unused): the square every layer texture covers.
     pub frame: [f32; 4],
     /// (scale, offset x, offset y, live layers): how the canvas is fitted to the window.

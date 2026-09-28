@@ -19,7 +19,7 @@ fn swapped_at(q: vec2<f32>, k: u32) -> Swapped {
     out.hide = 0.0;
     let n = u32(u.rhythm.x);
     for (var i = 0u; i < n; i = i + 1u) {
-        let s = u.swaps[i];
+        let s = uni_swap(i);
         if (u32(s.slot.w) != k || s.source.w <= 0.0) { continue; }
         let off = q - s.slot.xy;
         let d2 = dot(off, off) / (s.slot.z * s.slot.z);

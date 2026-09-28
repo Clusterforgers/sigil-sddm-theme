@@ -30,9 +30,9 @@ fn glyph_hide(p: vec2<f32>, k: u32) -> f32 {
     var acc = 0.0;
     let n = u32(u.live.w);
     for (var i = 0u; i < n; i = i + 1u) {
-        if (u32(u.glyphs[i].turn.z) != k) { continue; }
-        let a = u.glyphs[i].risen;
-        let g = u.glyphs[i].slot;
+        if (u32(uni_glyph(i).turn.z) != k) { continue; }
+        let a = uni_glyph(i).risen;
+        let g = uni_glyph(i).slot;
         let d = (p - g.xy) / g.zw;
         let t = max(1.0 - dot(d, d), 0.0);
         if (t <= 0.0) { continue; }
@@ -56,9 +56,9 @@ fn glyph_ghost(p: vec2<f32>) -> vec3<f32> {
     var acc = vec3<f32>(0.0);
     let n = u32(u.live.w);
     for (var i = 0u; i < n; i = i + 1u) {
-        let a = u.glyphs[i].risen;
+        let a = uni_glyph(i).risen;
         if (a.z <= 0.002) { continue; }
-        let g = u.glyphs[i].slot;
+        let g = uni_glyph(i).slot;
         let grow = 1.0 + 1.6 * a.w;
         let ext = g.zw * grow;
         let local = p - a.xy;
@@ -68,7 +68,7 @@ fn glyph_ghost(p: vec2<f32>) -> vec3<f32> {
         // Back into the artwork: undo the layer rotation, then undo the growth. Without
         // the rotation the copy would sit at whatever angle its layer happened to be at,
         // and could face the wrong way up entirely.
-        let rot = u.glyphs[i].turn;
+        let rot = uni_glyph(i).turn;
         let back = vec2<f32>(
             local.x * rot.y - local.y * rot.x,
             local.y * rot.y + local.x * rot.x,

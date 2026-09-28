@@ -33,8 +33,8 @@ fn pulse_at(r: f32) -> vec4<f32> {
     var warp = 0.0;
     let n = u32(u.live.x);
     for (var i = 0u; i < n; i = i + 1u) {
-        let p = u.pulses[i].wave;
-        let x = u.pulses[i].splash;
+        let p = uni_pulse(i).wave;
+        let x = uni_pulse(i).splash;
 
         // The impact itself: a blob where the drop hit, gone almost as soon as the crest
         // has left it. An implosion collapsing inward lights this up instead.
