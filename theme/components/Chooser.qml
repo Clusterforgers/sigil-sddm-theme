@@ -46,7 +46,9 @@ Row {
         color: chooser.ink
         font.family: chooser.family
         font.pixelSize: chooser.size
-        font.capitalization: Font.SmallCaps
+        // Capitals throughout: the display face has no small capitals, and Qt's stand-ins
+        // shrink every letter after the first.
+        font.capitalization: Font.AllUppercase
         font.letterSpacing: chooser.size * 0.25
     }
     TextButton {

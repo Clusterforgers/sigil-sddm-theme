@@ -12,7 +12,7 @@ Text {
     color: ink
     opacity: area.containsMouse ? 1 : 0.6
     font.pixelSize: size
-    font.capitalization: Font.SmallCaps
+    font.capitalization: Font.AllUppercase
     font.letterSpacing: size * 0.12
     Behavior on opacity { NumberAnimation { duration: 150 } }
 

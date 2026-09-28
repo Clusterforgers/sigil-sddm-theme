@@ -40,7 +40,7 @@ Rectangle {
         area: Qt.rect(0, 0, width, height * 0.84)
         ink: root.ink
         blood: root.blood
-        onDetonated: root.handOver()
+        onDetonated: checkAfter.restart()
     }
 
     Chooser {
@@ -128,8 +128,9 @@ Rectangle {
         Behavior on opacity { NumberAnimation { duration: 900; easing.type: Easing.InOutQuad } }
     }
 
-    // Enter: the symbols go up into the figure and it charges. The login itself waits for
-    // the explosion, so a quick success never cuts the charge short.
+    // Enter: the symbols go up into the figure and it charges. The password is checked only
+    // once it has exploded and flown apart for `login.check_after` seconds: a password that
+    // works ends the login screen at once, so anything after that would never be seen.
     function submit() {
         password.sealing = true
         if (!figure.surge())
@@ -140,13 +141,15 @@ Rectangle {
 
     function handOver() {
         watchdog.stop()
+        checkAfter.stop()
         if (!password.sealing)
             return
         sddm.login(user.name, password.text, session.currentIndex)
     }
 
+    Timer { id: checkAfter; interval: figure.checkAfter * 1000; onTriggered: root.handOver() }
     // Should the explosion never come, the login still goes ahead.
-    Timer { id: watchdog; interval: 5000; onTriggered: root.handOver() }
+    Timer { id: watchdog; interval: 5000 + figure.checkAfter * 1000; onTriggered: root.handOver() }
 
     Connections {
         target: sddm

@@ -307,6 +307,11 @@ bool SigilItem::systemInfo() const
     return m_engine && sigil_system_info(m_engine);
 }
 
+qreal SigilItem::checkAfter() const
+{
+    return m_engine ? sigil_check_after(m_engine) : 1.5;
+}
+
 void SigilItem::key()
 {
     if (m_engine)

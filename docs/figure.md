@@ -144,8 +144,14 @@ figure itself, and every effect above, run on the login screen exactly as in the
 ```json5
 login: {
   system_info: false,  // true for a panel down the left: system, host, kernel, CPU, memory, uptime, battery
+  check_after: 1.5,    // seconds of the explosion shown before the password is checked
 },
 ```
+
+Enter charges the figure for `effects.surge.charge` seconds, then it explodes. The
+password is checked `check_after` seconds after that. A password that works ends the login
+screen straight away, so this is all of the explosion anyone sees. One that does not is
+refused at that point, and the figure snaps back.
 
 The installed theme can also be customised without editing this file. A JSON file named
 `figure.overrides.json` next to the theme's `figure.json5` is laid over it when the login

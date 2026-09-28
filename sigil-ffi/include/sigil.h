@@ -52,6 +52,7 @@ int32_t sigil_take_detonated(SigilEngine *e); // nonzero once per explosion
 void sigil_pointer(SigilEngine *e, int32_t present, float x, float y);
 void sigil_skip_build(SigilEngine *e);
 int32_t sigil_system_info(const SigilEngine *e); // nonzero if the figure wants the system panel
+float sigil_check_after(const SigilEngine *e);   // seconds of explosion before the password is checked
 
 #ifdef __cplusplus
 }

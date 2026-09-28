@@ -207,6 +207,12 @@ pub extern "C" fn sigil_system_info(e: &SigilEngine) -> i32 {
     e.engine.fig.login.system_info as i32
 }
 
+/// Seconds of the explosion the login screen shows before checking the password.
+#[no_mangle]
+pub extern "C" fn sigil_check_after(e: &SigilEngine) -> f32 {
+    e.engine.fig.login.check_after.max(0.0)
+}
+
 /// Show the figure whole at once rather than drawing it in.
 #[no_mangle]
 pub extern "C" fn sigil_skip_build(e: &mut SigilEngine) {

@@ -30,6 +30,8 @@ class SigilItem : public QQuickRhiItem
     Q_PROPERTY(QString error READ error NOTIFY readyChanged)
     // Whether the figure file (`login.system_info`) wants the system panel.
     Q_PROPERTY(bool systemInfo READ systemInfo NOTIFY readyChanged)
+    // Seconds of the explosion to show before the password is checked (`login.check_after`).
+    Q_PROPERTY(qreal checkAfter READ checkAfter NOTIFY readyChanged)
 
 public:
     explicit SigilItem(QQuickItem *parent = nullptr);
@@ -40,6 +42,7 @@ public:
     bool ready() const { return m_engine != nullptr; }
     QString error() const { return m_error; }
     bool systemInfo() const;
+    qreal checkAfter() const;
 
     Q_INVOKABLE void key();
     Q_INVOKABLE void backspace();

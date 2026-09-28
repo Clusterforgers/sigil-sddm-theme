@@ -183,8 +183,8 @@ Item {
             color: root.blood
             opacity: 0
             font.family: root.textFamily
-            font.pixelSize: root.glyphSize * 0.55
-            font.capitalization: Font.SmallCaps
+            font.pixelSize: root.glyphSize * 0.5
+            font.capitalization: Font.AllUppercase
             font.letterSpacing: root.glyphSize * 0.14
             SequentialAnimation {
                 id: refusalFade

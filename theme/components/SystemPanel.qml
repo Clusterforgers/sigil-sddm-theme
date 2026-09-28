@@ -79,8 +79,8 @@ Column {
                     color: panel.ink
                     opacity: 0.55
                     font.family: panel.family
-                    font.pixelSize: panel.size * 0.85
-                    font.capitalization: Font.SmallCaps
+                    font.pixelSize: panel.size * 0.7
+                    font.capitalization: Font.AllUppercase
                     font.letterSpacing: panel.size * 0.12
                     anchors.baseline: reading.baseline
                 }

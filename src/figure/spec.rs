@@ -45,7 +45,7 @@ fn default_line_width() -> f32 {
 /// The login screen around the figure. Anything left out keeps its default.
 ///
 /// ```json5
-/// login: { system_info: false },
+/// login: { system_info: false, check_after: 1.5 },
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -53,11 +53,15 @@ pub struct Login {
     /// The panel down the left side: the system, host, kernel, CPU, memory, uptime and
     /// battery.
     pub system_info: bool,
+    /// Seconds of the explosion to show before the password is checked. A password that
+    /// works ends the login screen at once, so this is all of the explosion anyone sees;
+    /// one that does not waits this long to be refused.
+    pub check_after: f32,
 }
 
 impl Default for Login {
     fn default() -> Self {
-        Login { system_info: false }
+        Login { system_info: false, check_after: 1.5 }
     }
 }
 

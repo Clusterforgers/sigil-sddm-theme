@@ -28,6 +28,9 @@ Item {
     // Whether the figure file asks for the system panel. The panel needs the plugin, so
     // without it there is none to ask for.
     readonly property bool systemInfo: live && engine.item.systemInfo
+    // Seconds of the explosion to show before the password is checked: a password that works
+    // ends the login screen at once. The still's burst is over in about this long too.
+    readonly property real checkAfter: live ? engine.item.checkAfter : 1.0
 
     function key() { target.key() }
     function backspace() { target.backspace() }

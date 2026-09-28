@@ -33,7 +33,7 @@ Column {
         opacity: 0.7
         font.family: clock.family
         font.pixelSize: clock.size * 0.42
-        font.capitalization: Font.SmallCaps
+        font.capitalization: Font.AllUppercase
         font.letterSpacing: clock.size * 0.05
     }
 }

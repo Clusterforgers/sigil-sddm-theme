@@ -59,7 +59,9 @@
 
   // The login screen around the figure. `system_info: true` adds a panel of system, host,
   // kernel, CPU, memory, uptime and battery down the left side; off unless asked for.
-  login: { system_info: false },
+  // `check_after` is how many seconds of the explosion play before the password is
+  // checked: a password that works ends the login screen at once.
+  login: { system_info: false, check_after: 1.5 },
 
   // `turns` are whole revolutions per loop, positive clockwise. Stacking: a higher `z`
   // draws on top (default 0); equal `z` stacks in the order written here, later on top.
