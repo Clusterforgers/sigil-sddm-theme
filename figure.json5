@@ -46,7 +46,7 @@
     breath:   { strength: 0.22, period: 6 },
     // The figure drawing itself in: lines traced by a glowing pen, letters flashing into
     // place, over `duration` seconds, at start and when it reforms after the surge.
-    build:    { duration: 6, on_start: true, after_surge: true },
+    build:    { duration: 3, on_start: true, after_surge: true },
     // Fading copies trailing a layer that spins fast, as in the surge; 0 turns them off.
     echoes:   { strength: 1 },
     // Glowing threads linking `stars` letters across the rings.
@@ -56,6 +56,10 @@
     // Each character typed lights another letter; Backspace puts it out, Enter sends it.
     typing:   { enabled: true },
   },
+
+  // The login screen around the figure. `system_info: true` adds a panel of system, host,
+  // kernel, CPU, memory, uptime and battery down the left side; off unless asked for.
+  login: { system_info: false },
 
   // `turns` are whole revolutions per loop, positive clockwise. Stacking: a higher `z`
   // draws on top (default 0); equal `z` stacks in the order written here, later on top.

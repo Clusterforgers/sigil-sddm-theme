@@ -127,6 +127,7 @@ effects: {
   | F6 | colour each layer |
   | F7 / F8 | supersampling down / up |
   | F9 | bloom every layer |
+  | F10 | a refused password: the surge is called off and the figure snaps back |
 - **Previewing without a window:** `cargo run --release --bin bench -- --run 1.8
   --trigger color --out frame.png` renders 1.8 s after setting off a colour wave.
   `--trigger` sets off `surge`, `color`, `dissolve`, `scramble` or `constellation` at the
@@ -134,6 +135,33 @@ effects: {
   Leave it out to watch the figure draw itself in. `--surge 1.9` is short for `--run 1.9 --trigger surge`.
 - **Live editing:** in the viewer, saving the file restarts every schedule, so a shorter
   wait takes effect at once.
+
+## Login screen
+
+The optional `login` section sets what the SDDM theme shows around the figure. The
+figure itself, and every effect above, run on the login screen exactly as in the viewer.
+
+```json5
+login: {
+  system_info: false,  // true for a panel down the left: system, host, kernel, CPU, memory, uptime, battery
+},
+```
+
+The installed theme can also be customised without editing this file. A JSON file named
+`figure.overrides.json` next to the theme's `figure.json5` is laid over it when the login
+screen loads: objects merge key by key, anything else is replaced, so it only has to name
+what it changes. The NixOS module writes this file from its options:
+
+```nix
+programs.sigil-sddm = {
+  enable = true;
+  systemInfo = true;                            # login.system_info
+  settings.effects.lightning.enabled = false;   # anything else in this file
+};
+```
+
+The theme sets `effects.surge.stay_broken` to `true` there unless told otherwise: a password that works
+takes you away while the figure is in pieces, and one that does not calls the surge off.
 
 ## Tracks
 

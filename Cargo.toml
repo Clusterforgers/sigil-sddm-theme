@@ -8,7 +8,8 @@ default-run = "imagespin"
 clap = { version = "4", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# In file order: an element is read by its `type`, which has to come first.
+serde_json = { version = "1", features = ["preserve_order"] }
 
 # real-time viewer (src/bin/live.rs)
 bytemuck = { version = "1.14", features = ["derive"] }

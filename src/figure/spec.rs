@@ -30,6 +30,9 @@ pub struct Spec {
     /// How often each ambient effect happens; see `effects::Settings`. Optional.
     #[serde(default)]
     pub effects: crate::effects::Settings,
+    /// What the login screen shows around the figure; see `Login`. Optional.
+    #[serde(default)]
+    pub login: Login,
     /// Stacked by each layer's `z`, then by the order written here: a later layer draws
     /// over an earlier one with the same `z`.
     pub layers: Vec<LayerSpec>,
@@ -37,6 +40,25 @@ pub struct Spec {
 
 fn default_line_width() -> f32 {
     1.6
+}
+
+/// The login screen around the figure. Anything left out keeps its default.
+///
+/// ```json5
+/// login: { system_info: false },
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Login {
+    /// The panel down the left side: the system, host, kernel, CPU, memory, uptime and
+    /// battery.
+    pub system_info: bool,
+}
+
+impl Default for Login {
+    fn default() -> Self {
+        Login { system_info: false }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]

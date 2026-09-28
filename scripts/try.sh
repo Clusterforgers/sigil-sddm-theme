@@ -16,17 +16,18 @@ mode=${1:-preview}
 
 # The package's build environment, plus the Qt paths the preview needs, as variables.
 shell="let pkgs = (builtins.getFlake \"nixpkgs\").legacyPackages.\${builtins.currentSystem};
-in (pkgs.callPackage $root/nix/package.nix {}).overrideAttrs (_: {
+in (pkgs.callPackage $root/nix/package.nix {}).plugin.overrideAttrs (_: {
   QTBASE = pkgs.qt6.qtbase; QTDECL = pkgs.qt6.qtdeclarative; QTWAYLAND = pkgs.qt6.qtwayland;
 })"
 
 cd "$root"
 cargo run -q --release --bin export-shaders -- qml-plugin/shaders/sigil.frag >/dev/null
 
-# The theme as installed: its files, and the figure set to stay broken after a surge.
+# The theme as installed: its files, the figure, and the overrides the package writes.
 rm -rf "$stage" && mkdir -p "$stage/preview"
 cp -r theme "$stage/theme"
-sed 's/stay_broken: false/stay_broken: true/' figure.json5 > "$stage/theme/figure.json5"
+cp figure.json5 "$stage/theme/figure.json5"
+echo '{"effects":{"surge":{"stay_broken":true}}}' > "$stage/theme/figure.overrides.json"
 cp preview/Preview.qml "$stage/preview/"
 
 export QT_FORCE_STDERR_LOGGING=1

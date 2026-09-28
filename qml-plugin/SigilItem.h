@@ -18,6 +18,8 @@ class SigilItem : public QQuickRhiItem
     QML_ELEMENT
     // The figure file. Loading it draws every layer, which takes a moment.
     Q_PROPERTY(QUrl figure READ figure WRITE setFigure NOTIFY figureChanged)
+    // JSON settings laid over the figure file, if it exists: how NixOS customises the theme.
+    Q_PROPERTY(QUrl overrides MEMBER m_overrides NOTIFY figureChanged)
     // Texels per canvas unit, and supersamples per pixel side: sharpness against GPU time.
     Q_PROPERTY(qreal canvasScale MEMBER m_canvasScale NOTIFY figureChanged)
     Q_PROPERTY(int supersample MEMBER m_supersample NOTIFY figureChanged)
@@ -26,6 +28,8 @@ class SigilItem : public QQuickRhiItem
     Q_PROPERTY(QRectF figureArea MEMBER m_figureArea NOTIFY figureAreaChanged)
     Q_PROPERTY(bool ready READ ready NOTIFY readyChanged)
     Q_PROPERTY(QString error READ error NOTIFY readyChanged)
+    // Whether the figure file (`login.system_info`) wants the system panel.
+    Q_PROPERTY(bool systemInfo READ systemInfo NOTIFY readyChanged)
 
 public:
     explicit SigilItem(QQuickItem *parent = nullptr);
@@ -35,6 +39,7 @@ public:
     void setFigure(const QUrl &url);
     bool ready() const { return m_engine != nullptr; }
     QString error() const { return m_error; }
+    bool systemInfo() const;
 
     Q_INVOKABLE void key();
     Q_INVOKABLE void backspace();
@@ -60,6 +65,7 @@ private:
     void load();
 
     QUrl m_figure;
+    QUrl m_overrides;
     QRectF m_figureArea;
     qreal m_canvasScale = 2.0;
     int m_supersample = 2;

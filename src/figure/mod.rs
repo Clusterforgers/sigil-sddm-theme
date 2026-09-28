@@ -17,7 +17,7 @@ mod watch;
 
 pub use error::FigureError;
 pub use render::{Frame, Glyph, LayerImage, Rendered, LAYER_TINT};
-pub use spec::{LayerSpec, Loop, Rgb, Spec};
+pub use spec::{LayerSpec, Login, Loop, Rgb, Spec};
 pub use watch::watch;
 
 use crate::text::Font;
@@ -43,10 +43,41 @@ impl Figure {
         Self::parse(&src, base).map_err(|e| e.file(path))
     }
 
+    /// Read and check the figure at `path` with the settings in the JSON file `overrides`
+    /// laid over it: objects merge key by key, anything else is replaced. So
+    /// `{"login": {"system_info": false}}` changes that one setting and keeps the rest of
+    /// the file. This is how a NixOS configuration customises the installed figure, which
+    /// it cannot edit. A missing `overrides` file is the same as none.
+    pub fn load_with(path: impl AsRef<Path>, overrides: impl AsRef<Path>) -> Result<Self, FigureError> {
+        let (path, overrides) = (path.as_ref(), overrides.as_ref());
+        // The file on its own first, so a mistake in it is still reported at its line.
+        let plain = Self::load(path)?;
+        let Ok(extra) = std::fs::read_to_string(overrides) else { return Ok(plain) };
+        let extra: serde_json::Value = serde_json::from_str(&extra)
+            .map_err(|e| FigureError::new(format!("not JSON: {e}")).file(overrides))?;
+
+        let src = std::fs::read_to_string(path)
+            .map_err(|e| FigureError::new(format!("cannot read: {e}")).file(path))?;
+        let mut merged: serde_json::Value =
+            json5::from_str(&src).map_err(|e| FigureError::new(e.to_string()).file(path))?;
+        merge(&mut merged, extra);
+        let spec: Spec = serde_path_to_error::deserialize(merged).map_err(|e| {
+            let at = e.path().to_string();
+            FigureError::new(e.into_inner().to_string()).context(at).file(overrides)
+        })?;
+        let base = path.parent().unwrap_or(Path::new("."));
+        Self::from_spec(spec, base).map_err(|e| e.file(overrides))
+    }
+
     /// Parse and check figure source; a `font` in it is looked up relative to `base`.
     pub fn parse(src: &str, base: &Path) -> Result<Self, FigureError> {
         let mut de = json5::Deserializer::from_str(src);
-        let mut spec: Spec = serde_path_to_error::deserialize(&mut de).map_err(|e| FigureError::parse(src, e))?;
+        let spec: Spec = serde_path_to_error::deserialize(&mut de).map_err(|e| FigureError::parse(src, e))?;
+        Self::from_spec(spec, base)
+    }
+
+    /// Check a parsed figure and put it in order.
+    fn from_spec(mut spec: Spec, base: &Path) -> Result<Self, FigureError> {
         // Checked in file order, so `layers[i]` in a message is the i-th block in the file...
         check(&spec)?;
         // ...then put in stacking order, bottom first, which is the only order anything
@@ -127,6 +158,7 @@ impl Figure {
             scale,
             loop_secs: self.spec.timing.seconds(),
             effects: self.spec.effects,
+            login: self.spec.login,
             layers,
             glyphs: marks.iter().enumerate().flat_map(|(i, m)| render::glyphs(m, i)).collect(),
             warnings,
@@ -201,6 +233,23 @@ fn check(spec: &Spec) -> Result<(), FigureError> {
     Ok(())
 }
 
+/// Lay `over` onto `base`: objects merge key by key, anything else replaces what was there.
+fn merge(base: &mut serde_json::Value, over: serde_json::Value) {
+    match (base, over) {
+        (serde_json::Value::Object(b), serde_json::Value::Object(o)) => {
+            for (k, v) in o {
+                match b.get_mut(&k) {
+                    Some(slot) => merge(slot, v),
+                    None => {
+                        b.insert(k, v);
+                    }
+                }
+            }
+        }
+        (slot, v) => *slot = v,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +270,30 @@ mod tests {
 
     fn error(src: &str) -> String {
         parse(src).err().expect("should not load").to_string()
+    }
+
+    /// Overrides change what they name and nothing else, and one that makes no sense is
+    /// reported against the overrides file with the setting's path.
+    #[test]
+    fn overrides_change_only_what_they_name() {
+        let dir = std::env::temp_dir().join(format!("sigil-overrides-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (figure, over) = (dir.join("figure.json5"), dir.join("figure.overrides.json"));
+        std::fs::write(&figure, MINIMAL).unwrap();
+
+        let plain = Figure::load_with(&figure, &over).unwrap();
+        assert_eq!(plain.spec().login, Login::default(), "no overrides file is no overrides");
+
+        std::fs::write(&over, r#"{ "login": { "system_info": true }, "effects": { "surge": { "stay_broken": true } } }"#).unwrap();
+        let fig = Figure::load_with(&figure, &over).unwrap();
+        assert!(fig.spec().login.system_info);
+        assert!(fig.spec().effects.surge.stay_broken);
+        assert_eq!(fig.spec().layers.len(), 2, "the rest of the figure is untouched");
+
+        std::fs::write(&over, r#"{ "login": { "system_infoo": false } }"#).unwrap();
+        let e = Figure::load_with(&figure, &over).err().expect("a misspelled override loaded").to_string();
+        assert!(e.contains("figure.overrides.json") && e.contains("system_infoo"), "{e}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

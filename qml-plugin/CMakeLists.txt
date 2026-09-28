@@ -1,7 +1,9 @@
 cmake_minimum_required(VERSION 3.22)
 project(sigil-qml LANGUAGES CXX)
 
-# QQuickRhiItem is 6.7; the plugin must be built against the same Qt that SDDM runs.
+# QQuickRhiItem is 6.7; the plugin must be built against the same Qt that SDDM runs, which
+# the Nix package sees to. That is also why the private-module warning is not news.
+set(QT_NO_PRIVATE_MODULE_WARNING ON)
 find_package(Qt6 6.7 REQUIRED COMPONENTS Core Gui GuiPrivate Quick ShaderTools)
 find_package(Corrosion REQUIRED)
 
@@ -18,7 +20,7 @@ qt_add_qml_module(sigil
     VERSION 1.0
     PLUGIN_TARGET sigil
     OUTPUT_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/Sigil
-    SOURCES SigilItem.h SigilItem.cpp
+    SOURCES SigilItem.h SigilItem.cpp SystemInfo.h SystemInfo.cpp
 )
 
 # The fragment shader is generated from the WGSL by `cargo run --bin export-shaders`.

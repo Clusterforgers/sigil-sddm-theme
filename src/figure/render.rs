@@ -65,6 +65,8 @@ pub struct Rendered {
     pub loop_secs: f32,
     /// How often each ambient effect happens.
     pub effects: crate::effects::Settings,
+    /// What the login screen shows around the figure.
+    pub login: super::spec::Login,
     pub layers: Vec<LayerImage>,
     pub glyphs: Vec<Glyph>,
     pub warnings: Vec<String>,

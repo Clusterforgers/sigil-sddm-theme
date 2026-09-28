@@ -35,15 +35,18 @@ impl SigilBytes {
     }
 }
 
-/// Load the figure at `path` and draw its layers at `canvas_scale` texels per canvas unit,
-/// supersampled `ss` times. Null on failure, with the reason in `*error` if `error` is not
+/// Load the figure at `path`, with the JSON settings in `overrides` laid over it if that is
+/// not null and the file exists, and draw its layers at `canvas_scale` texels per canvas
+/// unit, supersampled `ss` times. Null on failure, with the reason in `*error` if `error` is not
 /// null; free that with `sigil_string_free`.
 ///
 /// # Safety
-/// `path` is a NUL-terminated string; `error` is null or points at writable storage.
+/// `path` is a NUL-terminated string, `overrides` null or one; `error` is null or points at
+/// writable storage.
 #[no_mangle]
 pub unsafe extern "C" fn sigil_engine_new(
     path: *const c_char,
+    overrides: *const c_char,
     canvas_scale: f32,
     ss: u32,
     error: *mut *mut c_char,
@@ -58,7 +61,12 @@ pub unsafe extern "C" fn sigil_engine_new(
         return fail("no figure path".into());
     }
     let path = CStr::from_ptr(path).to_string_lossy().into_owned();
-    let fig = match Figure::load(&path) {
+    let loaded = if overrides.is_null() {
+        Figure::load(&path)
+    } else {
+        Figure::load_with(&path, CStr::from_ptr(overrides).to_string_lossy().as_ref())
+    };
+    let fig = match loaded {
         Ok(f) => f.render(canvas_scale),
         Err(e) => return fail(e.to_string()),
     };
@@ -191,6 +199,12 @@ pub extern "C" fn sigil_take_detonated(e: &mut SigilEngine) -> i32 {
 #[no_mangle]
 pub extern "C" fn sigil_pointer(e: &mut SigilEngine, present: i32, x: f32, y: f32) {
     e.engine.pointer((present != 0).then_some([x, y]));
+}
+
+/// Nonzero if the figure file asks for the system panel on the login screen.
+#[no_mangle]
+pub extern "C" fn sigil_system_info(e: &SigilEngine) -> i32 {
+    e.engine.fig.login.system_info as i32
 }
 
 /// Show the figure whole at once rather than drawing it in.

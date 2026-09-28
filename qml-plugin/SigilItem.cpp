@@ -281,9 +281,11 @@ void SigilItem::load()
     if (m_figure.isEmpty())
         return;
     const QString path = m_figure.isLocalFile() ? m_figure.toLocalFile() : m_figure.toString();
+    const QByteArray overrides =
+        m_overrides.isEmpty() ? QByteArray() : QFile::encodeName(m_overrides.isLocalFile() ? m_overrides.toLocalFile() : m_overrides.toString());
     char *err = nullptr;
-    SigilEngine *next = sigil_engine_new(QFile::encodeName(path).constData(), float(m_canvasScale),
-                                         uint32_t(m_supersample), &err);
+    SigilEngine *next = sigil_engine_new(QFile::encodeName(path).constData(), overrides.isEmpty() ? nullptr : overrides.constData(),
+                                         float(m_canvasScale), uint32_t(m_supersample), &err);
     if (!next) {
         m_error = QString::fromUtf8(err);
         sigil_string_free(err);
@@ -298,6 +300,11 @@ void SigilItem::load()
     m_clock.invalidate();
     emit readyChanged();
     update();
+}
+
+bool SigilItem::systemInfo() const
+{
+    return m_engine && sigil_system_info(m_engine);
 }
 
 void SigilItem::key()

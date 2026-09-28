@@ -25,6 +25,9 @@ Item {
 
     readonly property bool live: engine.status === Loader.Ready
     readonly property Item target: live ? engine.item : still
+    // Whether the figure file asks for the system panel. The panel needs the plugin, so
+    // without it there is none to ask for.
+    readonly property bool systemInfo: live && engine.item.systemInfo
 
     function key() { target.key() }
     function backspace() { target.backspace() }

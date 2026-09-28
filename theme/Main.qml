@@ -19,7 +19,6 @@ Rectangle {
     readonly property color ink: conf("ink", "#FBB929")
     readonly property color blood: conf("blood", "#C0120C")
     readonly property string refusedText: conf("refusedText", "the seal refuses")
-    readonly property int idleSeconds: Number(conf("idleSeconds", 8))
     readonly property real unit: height / 1080
     // For the preview's demo.
     readonly property Item passwordField: password
@@ -30,12 +29,6 @@ Rectangle {
     FontLoader { source: "fonts/NotoSansSymbols-Regular.ttf" }
     FontLoader { source: "fonts/NotoSansSymbols2-Regular.ttf" }
     FontLoader { source: "fonts/NotoSansRunic-Regular.ttf" }
-
-    // Whether anything has happened lately. The chrome fades away when not, and leaves the
-    // figure and the password alone on the screen.
-    property bool awake: true
-    function stir() { awake = true; idle.restart() }
-    Timer { id: idle; interval: root.idleSeconds * 1000; running: true; onTriggered: root.awake = false }
 
     // Everything under the figure is placed from where its outer ring ends.
     readonly property real discBottom: figure.y + figure.discCenter.y + figure.discRadius
@@ -77,8 +70,8 @@ Rectangle {
         sink: mapFromItem(figure, figure.discCenter.x, figure.discCenter.y)
         focus: true
 
-        onKeyed: { figure.key(); root.stir() }
-        onBackspaced: { figure.backspace(); root.stir() }
+        onKeyed: figure.key()
+        onBackspaced: figure.backspace()
         onPreviousUser: user.step(-1)
         onNextUser: user.step(1)
         onSubmitted: root.submit()
@@ -94,6 +87,21 @@ Rectangle {
         size: 17 * root.unit
         showArrows: true
         opacity: chrome.opacity
+    }
+
+    // Down the left side, level with the figure: `login.system_info` in the figure file, or
+    // `programs.sigil-sddm.systemInfo` in NixOS. Needs the plugin; left out without it.
+    Loader {
+        active: figure.systemInfo
+        anchors { left: parent.left; leftMargin: 44 * root.unit }
+        y: figure.discCenter.y - height / 2
+        source: "components/SystemPanel.qml"
+        opacity: chrome.opacity
+        onLoaded: {
+            item.ink = Qt.binding(() => root.ink)
+            item.family = Qt.binding(() => display.name)
+            item.size = Qt.binding(() => 15 * root.unit)
+        }
     }
 
     Clock {
@@ -112,10 +120,11 @@ Rectangle {
         opacity: chrome.opacity
     }
 
-    // Stands in for the corners' shared opacity, so they fade as one.
+    // The corners' shared opacity: always there, until Enter clears the screen for the
+    // surge.
     QtObject {
         id: chrome
-        property real opacity: password.sealing ? 0 : root.awake ? 0.75 : 0
+        property real opacity: password.sealing ? 0 : 0.75
         Behavior on opacity { NumberAnimation { duration: 900; easing.type: Easing.InOutQuad } }
     }
 
@@ -156,13 +165,8 @@ Rectangle {
         NumberAnimation { id: darken; target: curtain; property: "opacity"; to: 1; duration: 400 }
     }
 
-    MouseArea {
-        anchors.fill: parent
-        z: -1
-        hoverEnabled: true
-        onPositionChanged: root.stir()
-        onClicked: password.focusInput()
-    }
+    // A click anywhere that is not a button puts the typing back in the password.
+    TapHandler { onTapped: password.focusInput() }
 
     Component.onCompleted: password.focusInput()
 }
