@@ -23,14 +23,25 @@ Item {
     property color ink: "#FBB929"
     property color blood: "#C0120C"
 
-    readonly property bool live: engine.status === Loader.Ready
+    // The plugin is there, and the figure it loads on a thread of its own has arrived.
+    readonly property bool plugin: engine.status === Loader.Ready
+    readonly property bool live: plugin && engine.item.ready
+    // Still arriving: a moment of bare background, which is less jarring than the still
+    // showing and then being swapped out.
+    readonly property bool loading: plugin && !engine.item.ready && engine.item.error === ""
     readonly property Item target: live ? engine.item : still
     // Whether the figure file asks for the system panel. The panel needs the plugin, so
     // without it there is none to ask for.
     readonly property bool systemInfo: live && engine.item.systemInfo
     // Seconds of the explosion to show before the password is checked: a password that works
     // ends the login screen at once. The still's burst is over in about this long too.
-    readonly property real checkAfter: live ? engine.item.checkAfter : 1.0
+    readonly property real checkAfter: live ? engine.item.checkAfter : 0.5
+    // The debug readout, if the figure file asks for one (`login.debug`). Without the plugin
+    // there is nothing to measure, and the still says so for itself.
+    readonly property bool debug: live && engine.item.debug
+    readonly property string device: plugin ? engine.item.device : ""
+    readonly property bool software: plugin && engine.item.software
+    readonly property string stats: plugin ? engine.item.stats : ""
 
     function key() { target.key() }
     function backspace() { target.backspace() }
@@ -53,7 +64,7 @@ Item {
         y: fig.area.y
         width: fig.area.width
         height: fig.area.height
-        visible: !fig.live
+        visible: !fig.live && !fig.loading
         ink: fig.ink
         blood: fig.blood
     }

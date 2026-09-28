@@ -12,6 +12,8 @@ Window {
     width: 1920
     height: 1080
     visible: true
+    // The demo runs full screen, at the size the login screen really draws at.
+    visibility: Qt.application.arguments.indexOf("demo") >= 0 ? Window.FullScreen : Window.AutomaticVisibility
     title: "sigil — preview"
     color: "black"
 
@@ -71,17 +73,30 @@ Window {
         focus: true
     }
 
+    // Types what it is given a key at a time, at about a person's speed.
+    Timer {
+        id: typer
+        property string pending: ""
+        interval: 150
+        repeat: true
+        running: pending.length > 0
+        onTriggered: {
+            theme.item.passwordField.insert(pending[0])
+            pending = pending.slice(1)
+        }
+    }
+
     // `qml preview/Preview.qml -- demo`: once the figure has drawn itself in, a refused
     // password and then the right one, typed from in here rather than by faking keys.
     SequentialAnimation {
         running: Qt.application.arguments.indexOf("demo") >= 0 && theme.status === Loader.Ready
         PauseAnimation { duration: 8000 }
-        ScriptAction { script: theme.item.passwordField.insert("nope") }
-        PauseAnimation { duration: 600 }
+        ScriptAction { script: typer.pending = "nope" }
+        PauseAnimation { duration: 1000 }
         ScriptAction { script: theme.item.passwordField.enter() }
         PauseAnimation { duration: 6000 }
-        ScriptAction { script: theme.item.passwordField.insert("sigil") }
-        PauseAnimation { duration: 600 }
+        ScriptAction { script: typer.pending = "sigil" }
+        PauseAnimation { duration: 1100 }
         ScriptAction { script: theme.item.passwordField.enter() }
     }
 }

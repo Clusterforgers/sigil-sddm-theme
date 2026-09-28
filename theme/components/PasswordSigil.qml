@@ -39,6 +39,33 @@ Item {
     function insert(t) { input.insert(input.cursorPosition, t) }
     function enter() { input.accepted() }
 
+    // Every symbol the field can show, and the refusal, drawn once at startup well off the
+    // screen: the fonts load and the glyphs are rasterised while the figure is still
+    // arriving, instead of stalling the first keystroke and the first refusal. Gone once done.
+    Column {
+        id: warmup
+        x: -100000
+        Repeater {
+            model: Glyphs.byFamily()
+            Text {
+                required property var modelData
+                text: modelData.text
+                font.family: modelData.family
+                font.pixelSize: root.glyphSize
+                color: root.ink
+            }
+        }
+        Text {
+            text: refusal.text || "the seal refuses"
+            font: refusal.font
+            color: root.blood
+        }
+        // One symbol as the field makes them, so the first keystroke does not pay for the
+        // component being compiled.
+        Glyph { sym: "☉︎"; family: "Noto Sans Symbols 2"; delay: 0; index: 0 }
+        Timer { interval: 3000; running: true; onTriggered: warmup.visible = false }
+    }
+
     // Forget what was typed, symbols and all, without the embers.
     function clear() {
         slots.clear()
@@ -62,7 +89,10 @@ Item {
         height: 1
         opacity: 0
         focus: true
-        echoMode: TextInput.Password
+        // Holds the text and shows nothing, so it has nothing to lay out: the symbols above
+        // are all anyone sees.
+        echoMode: TextInput.NoEcho
+        font.family: root.textFamily
         selectByMouse: false
         readOnly: root.sealing
         onTextChanged: root.sync()
@@ -104,16 +134,16 @@ Item {
         height: parent.height
         transform: Translate { id: jolt }
 
-        Row {
-            id: row
-            spacing: root.glyphSize * 0.32
-            height: root.glyphSize * 1.6
-            // Centred by hand rather than by anchor, so it can glide as it grows.
-            x: (field.width - width) / 2
+        // The glow is a blur of this box, which keeps one size however many symbols there
+        // are: a blur of the row itself would rebuild its buffers at every keystroke, which
+        // costs a frame each time. Enter switches it off, as the symbols leave for the figure.
+        Item {
+            id: glowBox
+            width: field.width
+            height: row.height
             y: rule.y - height - root.glyphSize * 0.1
-            Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
 
-            layer.enabled: true
+            layer.enabled: !root.sealing
             layer.effect: MultiEffect {
                 shadowEnabled: true
                 shadowColor: root.ink
@@ -121,28 +151,39 @@ Item {
                 shadowHorizontalOffset: 0
                 shadowVerticalOffset: 0
                 shadowOpacity: 0.9
+                autoPaddingEnabled: false
+                paddingRect: Qt.rect(root.glyphSize, root.glyphSize, root.glyphSize, root.glyphSize)
             }
 
-            Repeater {
-                id: glyphs
-                model: slots
-                delegate: Glyph {}
-            }
-
-            // The caret: a point of light where the next symbol will fall.
-            Text {
-                id: caret
-                visible: input.activeFocus && !root.sealing
-                text: "•"
-                color: root.ink
-                font.pixelSize: root.glyphSize * 0.5
-                height: row.height
-                verticalAlignment: Text.AlignVCenter
-                SequentialAnimation on opacity {
-                    running: caret.visible
-                    loops: Animation.Infinite
-                    NumberAnimation { to: 0.15; duration: 700; easing.type: Easing.InOutSine }
-                    NumberAnimation { to: 0.9; duration: 700; easing.type: Easing.InOutSine }
+            Row {
+                id: row
+                spacing: root.glyphSize * 0.32
+                height: root.glyphSize * 1.6
+                // Centred by hand rather than by anchor, so it can glide as it grows.
+                x: (field.width - width) / 2
+                Behavior on x { NumberAnimation { duration: 160; easing.type: Easing.OutCubic } }
+    
+                Repeater {
+                    id: glyphs
+                    model: slots
+                    delegate: Glyph {}
+                }
+    
+                // The caret: a point of light where the next symbol will fall.
+                Text {
+                    id: caret
+                    visible: input.activeFocus && !root.sealing
+                    text: "•"
+                    color: root.ink
+                    font.pixelSize: root.glyphSize * 0.5
+                    height: row.height
+                    verticalAlignment: Text.AlignVCenter
+                    SequentialAnimation on opacity {
+                        running: caret.visible
+                        loops: Animation.Infinite
+                        NumberAnimation { to: 0.15; duration: 700; easing.type: Easing.InOutSine }
+                        NumberAnimation { to: 0.9; duration: 700; easing.type: Easing.InOutSine }
+                    }
                 }
             }
         }

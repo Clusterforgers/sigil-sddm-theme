@@ -45,7 +45,7 @@ fn default_line_width() -> f32 {
 /// The login screen around the figure. Anything left out keeps its default.
 ///
 /// ```json5
-/// login: { system_info: false, check_after: 1.5 },
+/// login: { system_info: false, check_after: 0.5 },
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
@@ -57,11 +57,19 @@ pub struct Login {
     /// works ends the login screen at once, so this is all of the explosion anyone sees;
     /// one that does not waits this long to be refused.
     pub check_after: f32,
+    /// Samples per pixel side, 1 to 4, for smoothing the thin lines; 0 picks for the screen:
+    /// 1 on a high-resolution one, whose pixels are small enough not to need it, 2 below.
+    /// Each step up costs the GPU about as much again as the whole figure at 1.
+    pub supersample: u32,
+    /// A readout in the corner of the login screen: the graphics backend and GPU in use,
+    /// frames per second, the longest gap between frames and the GPU's time per frame. The
+    /// same goes to the journal every two seconds.
+    pub debug: bool,
 }
 
 impl Default for Login {
     fn default() -> Self {
-        Login { system_info: false, check_after: 1.5 }
+        Login { system_info: false, check_after: 0.5, supersample: 0, debug: false }
     }
 }
 

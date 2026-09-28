@@ -2,11 +2,13 @@
 
 #include "sigil.h"
 
+#include <QCoreApplication>
 #include <QFile>
 #include <QLoggingCategory>
 #include <QMetaObject>
 #include <QPointer>
 #include <QQuickWindow>
+#include <QThread>
 #include <rhi/qrhi.h>
 
 #include <memory>
@@ -49,6 +51,18 @@ private:
     QRhiTexture *layerArray(QRhiResourceUpdateBatch *batch, QRhiTexture::Format format, QRhiTexture::Flags flags,
                             int side, SigilBytes (*fetch)(SigilEngine *, uint32_t));
     void release();
+    // Every two seconds, with `sigil.info` logging on: frames per second, the longest gap
+    // between frames (what "laggy" means to someone watching), the engine's CPU time and,
+    // under QSG_RHI_PROFILE=1, the GPU's time for the pass.
+    void report(QSize px, qint64 gapNs, qint64 cpuNs);
+    QElapsedTimer m_since;
+    int m_frames = 0;
+    int m_ss = 1;
+    // Whether the device drawing this has been named yet.
+    void nameDevice();
+    bool m_named = false;
+    qint64 m_worstGap = 0, m_worstCpu = 0;
+    double m_gpu = 0;
 
     // What synchronize() took from the item for this frame.
     SigilEngine *m_engine = nullptr;
@@ -56,6 +70,8 @@ private:
     int m_built = -1;
     QByteArray m_uniforms;
     QPointer<SigilItem> m_item;
+    // The item's lock on the engine, for the work done outside synchronize().
+    QMutex *m_lock = nullptr;
 
     QRhi *m_rhi = nullptr;
     std::unique_ptr<QRhiBuffer> m_ubuf;
@@ -115,12 +131,16 @@ void SigilRenderer::initialize(QRhiCommandBuffer *cb)
         m_exact.reset();
         m_built = -1;
         m_rhi = rhi();
+        m_named = false;
     }
     if (!m_engine)
         return;
 
     QRhiResourceUpdateBatch *batch = nullptr;
     if (m_built != m_generation) {
+        QMutexLocker lock(m_lock);
+        QElapsedTimer took;
+        took.start();
         release();
         batch = m_rhi->nextResourceUpdateBatch();
         const int side = int(sigil_layer_side(m_engine));
@@ -154,8 +174,10 @@ void SigilRenderer::initialize(QRhiCommandBuffer *cb)
         });
         m_srb->create();
         m_built = m_generation;
+        // The upload copied them; the CPU's copies are a hundred-odd megabytes to let go of.
+        sigil_release_pyramids(m_engine);
         qCInfo(lcSigil) << "textures:" << sigil_layer_count(m_engine) << "layers of" << side << "square on"
-                        << m_rhi->backendName();
+                        << m_rhi->backendName() << "prepared in" << took.elapsed() << "ms";
     }
 
     if (!m_pipeline || m_passFor != renderTarget()->renderPassDescriptor()) {
@@ -176,12 +198,45 @@ void SigilRenderer::initialize(QRhiCommandBuffer *cb)
 
     if (batch)
         cb->resourceUpdate(batch);
+
+    if (!m_named)
+        nameDevice();
+}
+
+// Say once what is drawing the figure. A login screen that has fallen back to rendering on
+// the CPU is slow however little the theme asks of it, so that is said even without debug.
+void SigilRenderer::nameDevice()
+{
+    if (!m_item)
+        return;
+    m_named = true;
+    const QRhiDriverInfo d = m_rhi->driverInfo();
+    const QString name = QString::fromUtf8(d.deviceName);
+    const bool software = d.deviceType == QRhiDriverInfo::CpuDevice
+        || name.contains(QLatin1String("llvmpipe"), Qt::CaseInsensitive)
+        || name.contains(QLatin1String("softpipe"), Qt::CaseInsensitive)
+        || name.contains(QLatin1String("lavapipe"), Qt::CaseInsensitive)
+        || name.contains(QLatin1String("swrast"), Qt::CaseInsensitive);
+    const QString device = QStringLiteral("%1 on %2").arg(QString::fromLatin1(m_rhi->backendName()), name);
+    if (software)
+        qCWarning(lcSigil) << "drawing on the CPU, not a GPU:" << device;
+    else
+        qCInfo(lcSigil) << "drawing with" << device;
+    QMetaObject::invokeMethod(m_item.get(), [item = m_item, device, software] {
+        if (!item)
+            return;
+        item->m_device = device;
+        item->m_software = software;
+        emit item->statsChanged();
+    }, Qt::QueuedConnection);
 }
 
 void SigilRenderer::synchronize(QQuickRhiItem *rhiItem)
 {
     auto *item = static_cast<SigilItem *>(rhiItem);
     m_item = item;
+    m_lock = &item->m_lock;
+    QMutexLocker lock(m_lock);
     m_engine = item->m_engine;
     m_generation = item->m_generation;
     if (!m_engine)
@@ -205,21 +260,54 @@ void SigilRenderer::synchronize(QQuickRhiItem *rhiItem)
     const qreal k = item->width() > 0 ? px.width() / item->width() : 1.0;
     const QRectF area = item->m_figureArea.isEmpty() ? QRectF(QPointF(), px)
                                                       : QRectF(item->m_figureArea.topLeft() * k, item->m_figureArea.size() * k);
+    // Samples per pixel side: what the item says, else the figure file, else one sample on a
+    // screen of 3.5 megapixels or more, whose pixels are too small to need more, and two
+    // below. Each step up costs the GPU about as much again as the whole figure at one.
+    int ss = item->m_supersample > 0 ? item->m_supersample : int(sigil_login_supersample(m_engine));
+    if (ss <= 0)
+        ss = qint64(px.width()) * px.height() >= 3500000 ? 1 : 2;
+    sigil_set_supersample(m_engine, uint32_t(ss));
+    m_ss = ss;
+    QElapsedTimer cpu;
+    cpu.start();
     const SigilBytes u = sigil_frame(m_engine, dt, float(area.x()), float(area.y()), float(area.width()),
                                      float(area.height()), yUp ? float(px.height()) : 0.0f, 1);
     m_uniforms = QByteArray(reinterpret_cast<const char *>(u.data), qsizetype(u.len));
-    if (lcSigil().isDebugEnabled()) {
-        static int frames = 0;
-        if (frames++ % 120 == 0) {
-            const float *f = reinterpret_cast<const float *>(u.data);
-            // host, then fit (after centre and host and frame): scale, offset, layers.
-            qCDebug(lcSigil) << "frame" << px << "host" << f[2] << f[3] << "fit" << f[8] << f[9] << f[10] << f[11]
-                             << "bytes" << u.len;
-        }
-    }
+    if (item->m_debug || lcSigil().isInfoEnabled())
+        report(px, ns, cpu.nsecsElapsed());
 
     if (sigil_take_detonated(m_engine))
         QMetaObject::invokeMethod(item, &SigilItem::detonated, Qt::QueuedConnection);
+}
+
+void SigilRenderer::report(QSize px, qint64 gapNs, qint64 cpuNs)
+{
+    if (!m_since.isValid())
+        m_since.start();
+    ++m_frames;
+    m_worstGap = qMax(m_worstGap, gapNs);
+    m_worstCpu = qMax(m_worstCpu, cpuNs);
+    if (m_since.elapsed() < 2000)
+        return;
+    // GPU time needs timestamps, which Qt only asks the driver for under QSG_RHI_PROFILE=1.
+    const QString gpu = m_gpu > 0 ? QString::asprintf("%.2f ms", m_gpu * 1000.0) : QStringLiteral("n/a (QSG_RHI_PROFILE=1)");
+    const QString stats = QString::asprintf("%dx%d, %d sample%s per pixel side: %.0f fps, worst gap %.1f ms, engine %.2f ms, gpu ",
+                                            px.width(), px.height(), m_ss, m_ss == 1 ? "" : "s",
+                                            m_frames * 1000.0 / m_since.elapsed(), m_worstGap * 1e-6, m_worstCpu * 1e-6)
+        + gpu;
+    qCInfo(lcSigil).noquote() << stats;
+    if (m_item) {
+        QMetaObject::invokeMethod(m_item.get(), [item = m_item, stats] {
+            if (!item)
+                return;
+            item->m_stats = stats;
+            emit item->statsChanged();
+        }, Qt::QueuedConnection);
+    }
+    m_since.restart();
+    m_frames = 0;
+    m_worstGap = m_worstCpu = 0;
+    m_gpu = 0;
 }
 
 void SigilRenderer::render(QRhiCommandBuffer *cb)
@@ -228,11 +316,6 @@ void SigilRenderer::render(QRhiCommandBuffer *cb)
     if (m_ubuf && !m_uniforms.isEmpty())
         batch->updateDynamicBuffer(m_ubuf.get(), 0, quint32(m_uniforms.size()), m_uniforms.constData());
 
-    if (lcSigil().isDebugEnabled()) {
-        static int renders = 0;
-        if (renders++ % 120 == 0)
-            qCDebug(lcSigil) << "render" << renders << "pipeline" << bool(m_pipeline) << "engine" << bool(m_engine);
-    }
     cb->beginPass(renderTarget(), QColor(14, 13, 12), { 1.0f, 0 }, batch);
     if (m_pipeline && m_engine) {
         const QSize px = renderTarget()->pixelSize();
@@ -242,6 +325,8 @@ void SigilRenderer::render(QRhiCommandBuffer *cb)
         cb->draw(3);
     }
     cb->endPass();
+    // With QSG_RHI_PROFILE=1 the GPU's own time for a frame comes back a frame or two later.
+    m_gpu = qMax(m_gpu, cb->lastCompletedGpuTime());
 }
 
 SigilItem::SigilItem(QQuickItem *parent)
@@ -253,6 +338,8 @@ SigilItem::SigilItem(QQuickItem *parent)
 SigilItem::~SigilItem()
 {
     sigil_engine_free(m_engine);
+    for (SigilEngine *e : std::as_const(m_retired))
+        sigil_engine_free(e);
 }
 
 QQuickRhiItemRenderer *SigilItem::createRenderer()
@@ -276,25 +363,61 @@ void SigilItem::componentComplete()
     load();
 }
 
+// Loading draws every layer and builds its texture pyramids, most of a second of work. It
+// happens on a thread of its own so the login screen never stops for it; until it is done
+// the item draws only the background, and `ready` says when the figure is there.
 void SigilItem::load()
 {
     if (m_figure.isEmpty())
         return;
-    const QString path = m_figure.isLocalFile() ? m_figure.toLocalFile() : m_figure.toString();
-    const QByteArray overrides =
-        m_overrides.isEmpty() ? QByteArray() : QFile::encodeName(m_overrides.isLocalFile() ? m_overrides.toLocalFile() : m_overrides.toString());
-    char *err = nullptr;
-    SigilEngine *next = sigil_engine_new(QFile::encodeName(path).constData(), overrides.isEmpty() ? nullptr : overrides.constData(),
-                                         float(m_canvasScale), uint32_t(m_supersample), &err);
-    if (!next) {
-        m_error = QString::fromUtf8(err);
+    const auto local = [](const QUrl &u) { return QFile::encodeName(u.isLocalFile() ? u.toLocalFile() : u.toString()); };
+    const QByteArray path = local(m_figure);
+    const QByteArray overrides = m_overrides.isEmpty() ? QByteArray() : local(m_overrides);
+    const float scale = float(m_canvasScale);
+    const int load = ++m_loads;
+    const QPointer<SigilItem> self(this);
+
+    QThread *worker = QThread::create([=] {
+        QElapsedTimer took;
+        took.start();
+        char *err = nullptr;
+        SigilEngine *next =
+            sigil_engine_new(path.constData(), overrides.isEmpty() ? nullptr : overrides.constData(), scale, 1, &err);
+        const QString error = err ? QString::fromUtf8(err) : QString();
         sigil_string_free(err);
-        qWarning("sigil: cannot load %s: %s", qPrintable(path), qPrintable(m_error));
+        qCInfo(lcSigil) << "figure loaded in" << took.elapsed() << "ms";
+        // Back on the GUI thread. A newer load, or the item being gone, makes this one moot.
+        QMetaObject::invokeMethod(qApp, [self, next, error, load, path] {
+            if (!self || load != self->m_loads) {
+                sigil_engine_free(next);
+                return;
+            }
+            self->adopt(next, error, path);
+        }, Qt::QueuedConnection);
+    });
+    connect(worker, &QThread::finished, worker, &QObject::deleteLater);
+    worker->start();
+}
+
+void SigilItem::adopt(SigilEngine *next, const QString &error, const QByteArray &path)
+{
+    if (!next) {
+        m_error = error;
+        qWarning("sigil: cannot load %s: %s", path.constData(), qPrintable(m_error));
         emit readyChanged();
         return;
     }
-    sigil_engine_free(m_engine);
-    m_engine = next;
+    {
+        QMutexLocker lock(&m_lock);
+        // The renderer may still be reading the old one this frame; it goes with the item.
+        if (m_engine)
+            m_retired.append(m_engine);
+        m_engine = next;
+    }
+    // The readout, and the journal report with it, which otherwise needs a logging rule.
+    m_debug = sigil_login_debug(next);
+    if (m_debug)
+        const_cast<QLoggingCategory &>(lcSigil()).setEnabled(QtInfoMsg, true);
     m_error.clear();
     ++m_generation;
     m_clock.invalidate();
@@ -304,49 +427,61 @@ void SigilItem::load()
 
 bool SigilItem::systemInfo() const
 {
+    QMutexLocker lock(&m_lock);
     return m_engine && sigil_system_info(m_engine);
+}
+
+bool SigilItem::debug() const
+{
+    return m_debug;
 }
 
 qreal SigilItem::checkAfter() const
 {
-    return m_engine ? sigil_check_after(m_engine) : 1.5;
+    QMutexLocker lock(&m_lock);
+    return m_engine ? sigil_check_after(m_engine) : 0.5;
 }
 
 void SigilItem::key()
 {
+    QMutexLocker lock(&m_lock);
     if (m_engine)
         sigil_key(m_engine);
 }
 
 void SigilItem::backspace()
 {
+    QMutexLocker lock(&m_lock);
     if (m_engine)
         sigil_backspace(m_engine);
 }
 
 bool SigilItem::surge()
 {
+    QMutexLocker lock(&m_lock);
     return m_engine && sigil_surge(m_engine);
 }
 
 void SigilItem::fail()
 {
+    QMutexLocker lock(&m_lock);
     if (m_engine)
         sigil_fail(m_engine);
 }
 
 void SigilItem::hoverMoveEvent(QHoverEvent *event)
 {
-    if (!m_engine)
-        return;
     // The engine thinks in the frame's pixels, which are the item's scaled by the screen.
     const qreal dpr = window() ? window()->effectiveDevicePixelRatio() : 1.0;
     const QPointF p = event->position() * dpr;
-    sigil_pointer(m_engine, 1, float(p.x()), float(p.y()));
+    QMutexLocker lock(&m_lock);
+    if (m_engine)
+        sigil_pointer(m_engine, 1, float(p.x()), float(p.y()));
 }
 
 void SigilItem::hoverLeaveEvent(QHoverEvent *)
 {
+    QMutexLocker lock(&m_lock);
     if (m_engine)
         sigil_pointer(m_engine, 0, 0, 0);
 }

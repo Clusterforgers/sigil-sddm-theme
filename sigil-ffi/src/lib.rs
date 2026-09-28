@@ -2,11 +2,11 @@
 //! screen. `include/sigil.h` declares the same calls; keep the two in step.
 //!
 //! Every call takes the engine made by `sigil_engine_new` and is safe to make from any one
-//! thread at a time. Byte views it hands back stay valid until the next call of the same
-//! kind, or until the engine is freed; the plugin copies them straight away.
+//! thread at a time. Byte views it hands back stay valid until the next call that changes
+//! the engine; the plugin copies them straight away.
 
 use imagespin::engine::Engine;
-use imagespin::figure::Figure;
+use imagespin::figure::{Figure, LayerImage};
 use imagespin::gpu::{glow_pyramid, source_pyramid};
 
 use std::ffi::{c_char, CStr, CString};
@@ -14,11 +14,29 @@ use std::ptr;
 
 pub struct SigilEngine {
     engine: Engine,
-    /// What the last byte-returning call handed out, kept alive for the caller to copy.
-    art: Vec<u8>,
-    glow: Vec<u8>,
-    reveal: Vec<u8>,
+    /// Each layer's artwork and glow with their mips, made with the engine so the thread
+    /// that makes it pays for them, and dropped once they are on the GPU.
+    pyramids: Vec<Option<Pyramids>>,
+    /// The last frame's uniform block, kept alive for the caller to copy.
     uniforms: Vec<u8>,
+}
+
+struct Pyramids {
+    art: (Vec<u8>, u32),
+    glow: (Vec<u8>, u32),
+}
+
+impl Pyramids {
+    fn of(layer: &LayerImage) -> Self {
+        Pyramids { art: source_pyramid(&layer.image), glow: glow_pyramid(&layer.image) }
+    }
+}
+
+impl SigilEngine {
+    fn pyramids(&mut self, i: usize) -> Option<&Pyramids> {
+        let layer = self.engine.fig.layers.get(i)?;
+        Some(self.pyramids[i].get_or_insert_with(|| Pyramids::of(layer)))
+    }
 }
 
 /// A view of bytes owned by the engine, and how many mip levels they hold.
@@ -70,8 +88,13 @@ pub unsafe extern "C" fn sigil_engine_new(
         Ok(f) => f.render(canvas_scale),
         Err(e) => return fail(e.to_string()),
     };
+    // A layer at a time, each on its own thread: this is most of the work of loading.
+    let pyramids = std::thread::scope(|s| {
+        let jobs: Vec<_> = fig.layers.iter().map(|l| s.spawn(|| Pyramids::of(l))).collect();
+        jobs.into_iter().map(|j| j.join().ok()).collect()
+    });
     let engine = Engine::new(fig, ss.clamp(1, 4));
-    Box::into_raw(Box::new(SigilEngine { engine, art: Vec::new(), glow: Vec::new(), reveal: Vec::new(), uniforms: Vec::new() }))
+    Box::into_raw(Box::new(SigilEngine { engine, pyramids, uniforms: Vec::new() }))
 }
 
 /// # Safety
@@ -113,27 +136,26 @@ pub extern "C" fn sigil_reveal_side(e: &SigilEngine) -> u32 {
 /// Layer `i`'s artwork and its mips, smallest last: sRGB-encoded premultiplied RGBA8.
 #[no_mangle]
 pub extern "C" fn sigil_layer_art(e: &mut SigilEngine, i: u32) -> SigilBytes {
-    let Some(l) = e.engine.fig.layers.get(i as usize) else { return SigilBytes::of(&[], 0) };
-    let (bytes, levels) = source_pyramid(&l.image);
-    e.art = bytes;
-    SigilBytes::of(&e.art, levels)
+    e.pyramids(i as usize).map_or(SigilBytes::of(&[], 0), |p| SigilBytes::of(&p.art.0, p.art.1))
 }
 
 /// Layer `i`'s bloom highlight and its mips, smallest last: linear R8.
 #[no_mangle]
 pub extern "C" fn sigil_layer_glow(e: &mut SigilEngine, i: u32) -> SigilBytes {
-    let Some(l) = e.engine.fig.layers.get(i as usize) else { return SigilBytes::of(&[], 0) };
-    let (bytes, levels) = glow_pyramid(&l.image);
-    e.glow = bytes;
-    SigilBytes::of(&e.glow, levels)
+    e.pyramids(i as usize).map_or(SigilBytes::of(&[], 0), |p| SigilBytes::of(&p.glow.0, p.glow.1))
 }
 
 /// Layer `i`'s reveal map: RG8, one level.
 #[no_mangle]
 pub extern "C" fn sigil_layer_reveal(e: &mut SigilEngine, i: u32) -> SigilBytes {
-    let Some(l) = e.engine.fig.layers.get(i as usize) else { return SigilBytes::of(&[], 0) };
-    e.reveal = l.reveal.clone();
-    SigilBytes::of(&e.reveal, 1)
+    e.engine.fig.layers.get(i as usize).map_or(SigilBytes::of(&[], 0), |l| SigilBytes::of(&l.reveal, 1))
+}
+
+/// The textures are on the GPU: let go of the CPU's copies of the pyramids, a hundred-odd
+/// megabytes. Asking for a layer again makes it afresh.
+#[no_mangle]
+pub extern "C" fn sigil_release_pyramids(e: &mut SigilEngine) {
+    e.pyramids.iter_mut().for_each(|p| *p = None);
 }
 
 /// The size of the uniform block, in bytes.
@@ -205,6 +227,24 @@ pub extern "C" fn sigil_pointer(e: &mut SigilEngine, present: i32, x: f32, y: f3
 #[no_mangle]
 pub extern "C" fn sigil_system_info(e: &SigilEngine) -> i32 {
     e.engine.fig.login.system_info as i32
+}
+
+/// Nonzero if the figure file asks for the debug readout.
+#[no_mangle]
+pub extern "C" fn sigil_login_debug(e: &SigilEngine) -> i32 {
+    e.engine.fig.login.debug as i32
+}
+
+/// Samples per pixel side the figure file asks for, or 0 to pick for the screen.
+#[no_mangle]
+pub extern "C" fn sigil_login_supersample(e: &SigilEngine) -> u32 {
+    e.engine.fig.login.supersample.min(4)
+}
+
+/// Draw with `ss` samples per pixel side from the next frame on, 1 to 4.
+#[no_mangle]
+pub extern "C" fn sigil_set_supersample(e: &mut SigilEngine, ss: u32) {
+    e.engine.ss = ss.clamp(1, 4);
 }
 
 /// Seconds of the explosion the login screen shows before checking the password.

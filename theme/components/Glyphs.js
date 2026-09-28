@@ -34,6 +34,15 @@ const pool = [].concat(
     range(0x16A0, 0x16EA, RUNIC)
 )
 
+// Every symbol in the pool, run together by font: drawn once at startup so each font is
+// loaded and each glyph rasterised before the first keystroke, rather than on it.
+function byFamily() {
+    const runs = {}
+    for (const g of pool)
+        runs[g.family] = (runs[g.family] || "") + g.text
+    return Object.keys(runs).map(f => ({ family: f, text: runs[f] }))
+}
+
 // A symbol not among `recent`, so neighbouring slots never repeat.
 function pick(recent) {
     for (let tries = 0; tries < 8; tries++) {

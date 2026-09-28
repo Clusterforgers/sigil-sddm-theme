@@ -35,6 +35,8 @@ uint32_t sigil_reveal_side(const SigilEngine *e);
 SigilBytes sigil_layer_art(SigilEngine *e, uint32_t layer);    // sRGB RGBA8, premultiplied
 SigilBytes sigil_layer_glow(SigilEngine *e, uint32_t layer);   // linear R8
 SigilBytes sigil_layer_reveal(SigilEngine *e, uint32_t layer); // RG8, one level
+// Once uploaded: free the CPU copies of the pyramids. Asking for a layer again rebuilds it.
+void sigil_release_pyramids(SigilEngine *e);
 
 size_t sigil_uniforms_size(void);
 // Advance by dt seconds and lay out a frame with the figure fitted into the pixel
@@ -53,6 +55,9 @@ void sigil_pointer(SigilEngine *e, int32_t present, float x, float y);
 void sigil_skip_build(SigilEngine *e);
 int32_t sigil_system_info(const SigilEngine *e); // nonzero if the figure wants the system panel
 float sigil_check_after(const SigilEngine *e);   // seconds of explosion before the password is checked
+uint32_t sigil_login_supersample(const SigilEngine *e); // samples per pixel side asked for; 0 for automatic
+int32_t sigil_login_debug(const SigilEngine *e);        // nonzero for the debug readout
+void sigil_set_supersample(SigilEngine *e, uint32_t ss); // 1 to 4, from the next frame
 
 #ifdef __cplusplus
 }

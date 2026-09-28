@@ -154,6 +154,9 @@ Rectangle {
     Connections {
         target: sddm
         function onLoginFailed() {
+            // SDDM can say so twice for one attempt; the second finds nothing to refuse.
+            if (!password.sealing)
+                return
             figure.fail()
             password.refuse(root.refusedText)
         }
@@ -166,6 +169,18 @@ Rectangle {
         color: "black"
         opacity: 0
         NumberAnimation { id: darken; target: curtain; property: "opacity"; to: 1; duration: 400 }
+    }
+
+    // `login.debug`: what is drawing the figure and how fast, in the corner. Red if that is the
+    // CPU standing in for a GPU, which no amount of work on the theme will make smooth.
+    Text {
+        visible: figure.debug
+        anchors { left: parent.left; bottom: parent.bottom; margins: 36 * root.unit }
+        text: (figure.device || "finding the GPU…") + "\n" + (figure.stats || "measuring…")
+        color: figure.software ? root.blood : root.ink
+        opacity: 0.85
+        font.family: "monospace"
+        font.pixelSize: 13 * root.unit
     }
 
     // A click anywhere that is not a button puts the typing back in the password.

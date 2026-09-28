@@ -144,7 +144,9 @@ figure itself, and every effect above, run on the login screen exactly as in the
 ```json5
 login: {
   system_info: false,  // true for a panel down the left: system, host, kernel, CPU, memory, uptime, battery
-  check_after: 1.5,    // seconds of the explosion shown before the password is checked
+  check_after: 0.5,    // seconds of the explosion shown before the password is checked
+  supersample: 0,      // 1 to 4 samples per pixel side; 0 picks: 1 on a high-resolution screen, 2 below
+  debug: false,        // true: the backend and GPU drawing the screen, fps and GPU time, in the corner
 },
 ```
 
@@ -152,6 +154,15 @@ Enter charges the figure for `effects.surge.charge` seconds, then it explodes. T
 password is checked `check_after` seconds after that. A password that works ends the login
 screen straight away, so this is all of the explosion anyone sees. One that does not is
 refused at that point, and the figure snaps back.
+
+**Is it the theme, or the login screen's setup?** With `debug: true` (or
+`programs.sigil-sddm.debug = true` in NixOS) the login screen names, in its bottom-left
+corner, the graphics backend and the device drawing it, and every two seconds its frame rate,
+the longest gap between frames and the GPU's time per frame. If the device is the CPU
+standing in for a GPU (llvmpipe and the like) the readout turns red, and no work on the
+theme will make it smooth: the greeter's graphics setup needs looking at instead. That case
+is also logged, debug or not. To try it outside SDDM, run `SIGIL_DEBUG=1 scripts/try.sh
+greeter`; adding `LIBGL_ALWAYS_SOFTWARE=1` shows what the software case looks like.
 
 The installed theme can also be customised without editing this file. A JSON file named
 `figure.overrides.json` next to the theme's `figure.json5` is laid over it when the login

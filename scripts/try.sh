@@ -4,6 +4,9 @@
 #   scripts/try.sh            the mock preview: password `sigil`, anything else is refused
 #   scripts/try.sh demo       the same, typing a wrong password and then the right one itself
 #   scripts/try.sh greeter    SDDM's own greeter in test mode (login does nothing there)
+#   scripts/try.sh weston     the same, inside a full-screen Weston, as SDDM runs it at boot
+#
+# With SIGIL_DEBUG=1, any of them shows which GPU is drawing and how fast, in the corner.
 #
 # Everything comes from the system's nixpkgs, the same Qt that SDDM runs. The plugin builds
 # incrementally in build-qt/. Qt logs to the journal unless told otherwise, so it is told.
@@ -18,6 +21,7 @@ mode=${1:-preview}
 shell="let pkgs = (builtins.getFlake \"nixpkgs\").legacyPackages.\${builtins.currentSystem};
 in (pkgs.callPackage $root/nix/package.nix {}).plugin.overrideAttrs (_: {
   QTBASE = pkgs.qt6.qtbase; QTDECL = pkgs.qt6.qtdeclarative; QTWAYLAND = pkgs.qt6.qtwayland;
+  QTSVG = pkgs.qt6.qtsvg; SDDM = pkgs.kdePackages.sddm.unwrapped; WESTON = pkgs.weston;
 })"
 
 cd "$root"
@@ -27,7 +31,13 @@ cargo run -q --release --bin export-shaders -- qml-plugin/shaders/sigil.frag >/d
 rm -rf "$stage" && mkdir -p "$stage/preview"
 cp -r theme "$stage/theme"
 cp figure.json5 "$stage/theme/figure.json5"
-echo '{"effects":{"surge":{"stay_broken":true}}}' > "$stage/theme/figure.overrides.json"
+# SIGIL_DEBUG=1: the readout of GPU and frame rate, and GPU timestamps for it.
+if [ -n "${SIGIL_DEBUG:-}" ]; then
+    echo '{"effects":{"surge":{"stay_broken":true}},"login":{"debug":true}}' > "$stage/theme/figure.overrides.json"
+    export QSG_INFO=1 QSG_RHI_PROFILE=1
+else
+    echo '{"effects":{"surge":{"stay_broken":true}}}' > "$stage/theme/figure.overrides.json"
+fi
 cp preview/Preview.qml "$stage/preview/"
 
 export QT_FORCE_STDERR_LOGGING=1
@@ -37,10 +47,16 @@ nix-shell -E "$shell" --run "
     set -e
     [ -f '$build/build.ninja' ] || cmake -S qml-plugin -B '$build' -G Ninja -DCMAKE_BUILD_TYPE=Release -DQT_NO_PRIVATE_MODULE_WARNING=ON >/dev/null
     cmake --build '$build' | grep -v '^\[' || true
-    if [ '$mode' = greeter ]; then
-        QML_IMPORT_PATH='$build' exec sddm-greeter-qt6 --test-mode --theme '$stage/theme'
-    fi
-    export QT_PLUGIN_PATH=\$QTWAYLAND/lib/qt-6/plugins:\$QTDECL/lib/qt-6/plugins:\$QTBASE/lib/qt-6/plugins
+    export QT_PLUGIN_PATH=\$QTWAYLAND/lib/qt-6/plugins:\$QTDECL/lib/qt-6/plugins:\$QTSVG/lib/qt-6/plugins:\$QTBASE/lib/qt-6/plugins
     export QML_IMPORT_PATH='$build':\$QTDECL/lib/qt-6/qml:\$QTWAYLAND/lib/qt-6/qml
+    # The unwrapped greeter: the installed one would put the system's copy of the plugin
+    # ahead of this build.
+    greeter=\"\$SDDM/bin/sddm-greeter-qt6 --test-mode --theme $stage/theme\"
+    if [ '$mode' = greeter ]; then
+        exec \$greeter
+    fi
+    if [ '$mode' = weston ]; then
+        exec \$WESTON/bin/weston --backend=wayland --fullscreen --shell=kiosk --socket=sigil-try -- \$greeter
+    fi
     exec \$QTDECL/bin/qml '$stage/preview/Preview.qml' -- $mode
 "
